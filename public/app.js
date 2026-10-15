@@ -45,14 +45,17 @@
     nextDay: $('next-day'),
     datePill: $('date-pill'),
     datePillText: $('date-pill-text'),
-    dateInput: $('date-input'),
 
     addForm: $('add-form'),
     addInput: $('add-input'),
     addHint: $('add-hint'),
     composerDate: $('composer-date'),
     composerDateText: $('composer-date-text'),
-    composerDateInput: $('composer-date-input'),
+
+    // 日期选择弹层
+    datePop: $('date-pop'),
+    popTitle: $('pop-title'),
+    popGrid: $('pop-grid'),
 
     // 侧栏
     sidebar: $('sidebar'),
@@ -687,9 +690,7 @@
     el.pageTitle.textContent = title;
     el.pageDate.textContent = sub;
     el.datePillText.textContent = `${state.date} ${WEEKDAYS[weekdayOf(state.date)]}`;
-    el.dateInput.value = state.date;
     el.composerDateText.textContent = title === '今天' ? '今天' : `${state.date.slice(5)} ${WEEKDAYS[weekdayOf(state.date)]}`;
-    el.composerDateInput.value = state.date;
     const isToday = state.date === todayStr();
     el.carryoverBtn.style.visibility = isToday ? 'visible' : 'hidden';
     // 日历视图跟随所选日期
@@ -710,11 +711,129 @@
     if (state.month) { openMonth(shiftMonthStr(state.month, 1), { closeSide: false }); return; }
     gotoDate(shiftDate(state.date, 1));
   });
-  el.dateInput.addEventListener('change', () => {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(el.dateInput.value)) gotoDate(el.dateInput.value);
+  /* --------------------- 自定义日期选择弹层 --------------------- */
+  const pop = {
+    open: false,
+    viewY: 0, viewM: 0,      // 弹层正在浏览的年 / 月(0-11)
+    value: '',               // 当前选中 YYYY-MM-DD
+    origin: '',              // 打开时的原值（「清空」恢复用）
+    anchor: null,
+    onPick: null,
+  };
+
+  function closeDatePop() {
+    pop.open = false;
+    el.datePop.classList.add('hidden');
+    document.removeEventListener('pointerdown', pop.onOutside, true);
+    document.removeEventListener('keydown', pop.onKeydown, true);
+    window.removeEventListener('scroll', closeDatePop, true);
+    window.removeEventListener('resize', closeDatePop);
+  }
+  pop.onOutside = (e) => {
+    if (!el.datePop.contains(e.target) && e.target !== pop.anchor && !pop.anchor?.contains(e.target)) closeDatePop();
+  };
+  pop.onKeydown = (e) => { if (e.key === 'Escape') closeDatePop(); };
+
+  function positionDatePop() {
+    const r = pop.anchor.getBoundingClientRect();
+    const popEl = el.datePop;
+    const pw = popEl.offsetWidth;
+    const ph = popEl.offsetHeight;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(10, Math.min(left, window.innerWidth - pw - 10));
+    let top = r.bottom + 8;
+    if (top + ph > window.innerHeight - 10) top = r.top - ph - 8;
+    popEl.style.left = `${Math.round(left)}px`;
+    popEl.style.top = `${Math.round(Math.max(10, top))}px`;
+  }
+
+  function renderDatePop() {
+    el.popTitle.textContent = `${pop.viewY} 年 ${pop.viewM + 1} 月`;
+    el.popGrid.innerHTML = '';
+    const today = todayStr();
+    for (const name of ['日', '一', '二', '三', '四', '五', '六']) {
+      el.popGrid.appendChild(Object.assign(document.createElement('span'), { className: 'cal-dow', textContent: name }));
+    }
+    const first = new Date(pop.viewY, pop.viewM, 1);
+    const start = new Date(first);
+    start.setDate(1 - first.getDay());   // 补齐首周，含相邻月
+    for (let i = 0; i < 42; i += 1) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const dateStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      const outside = d.getMonth() !== pop.viewM;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cal-day'
+        + (outside ? ' is-outside' : '')
+        + (dateStr === today ? ' is-today' : '')
+        + (dateStr === pop.value ? ' is-selected' : '');
+      btn.textContent = String(d.getDate());
+      btn.addEventListener('click', () => {
+        pop.value = dateStr;
+        // 点到相邻月的日期时，视图跟着翻过去
+        pop.viewY = d.getFullYear();
+        pop.viewM = d.getMonth();
+        renderDatePop();
+        positionDatePop();
+        pop.onPick?.(pop.value);
+      });
+      el.popGrid.appendChild(btn);
+    }
+  }
+
+  function openDatePop(anchor, value, onPick) {
+    pop.anchor = anchor;
+    pop.value = value;
+    pop.origin = value;
+    pop.onPick = onPick;
+    pop.open = true;
+    const [y, m] = value.split('-').map(Number);
+    pop.viewY = y;
+    pop.viewM = m - 1;
+
+    el.datePop.classList.remove('hidden');
+    renderDatePop();
+    positionDatePop();
+
+    document.addEventListener('pointerdown', pop.onOutside, true);
+    document.addEventListener('keydown', pop.onKeydown, true);
+    window.addEventListener('scroll', closeDatePop, true);
+    window.addEventListener('resize', closeDatePop);
+  }
+
+  $('pop-prev-year').addEventListener('click', () => { pop.viewY -= 1; renderDatePop(); });
+  $('pop-next-year').addEventListener('click', () => { pop.viewY += 1; renderDatePop(); });
+  $('pop-prev-month').addEventListener('click', () => {
+    const d = new Date(pop.viewY, pop.viewM - 1, 1);
+    pop.viewY = d.getFullYear(); pop.viewM = d.getMonth(); renderDatePop();
   });
-  el.composerDateInput.addEventListener('change', () => {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(el.composerDateInput.value)) gotoDate(el.composerDateInput.value);
+  $('pop-next-month').addEventListener('click', () => {
+    const d = new Date(pop.viewY, pop.viewM + 1, 1);
+    pop.viewY = d.getFullYear(); pop.viewM = d.getMonth(); renderDatePop();
+  });
+  $('pop-today').addEventListener('click', () => {
+    pop.value = todayStr();
+    const [y, m] = pop.value.split('-').map(Number);
+    pop.viewY = y; pop.viewM = m - 1;
+    renderDatePop();
+    pop.onPick?.(pop.value);
+    closeDatePop();
+  });
+  $('pop-clear').addEventListener('click', () => {
+    pop.value = pop.origin;
+    pop.onPick?.(pop.value);
+    closeDatePop();
+  });
+  $('pop-ok').addEventListener('click', closeDatePop);
+
+  el.datePill.addEventListener('click', () => {
+    if (pop.open) { closeDatePop(); return; }
+    openDatePop(el.datePill, state.date, (d) => gotoDate(d));
+  });
+  el.composerDate.addEventListener('click', () => {
+    if (pop.open) { closeDatePop(); return; }
+    openDatePop(el.composerDate, state.date, (d) => gotoDate(d));
   });
 
   async function gotoDate(date) {
@@ -761,7 +880,6 @@
     el.datePillText.textContent = `${state.month} 全月`;
     // composer 归属日期保持在当月，新添加的任务会落进当前查看的月份
     el.composerDateText.textContent = `${state.date.slice(5)} ${WEEKDAYS[weekdayOf(state.date)]}`;
-    el.composerDateInput.value = state.date;
     el.carryoverBtn.style.visibility = 'hidden';
   }
 

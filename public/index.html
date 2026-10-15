@@ -141,10 +141,9 @@
       <!-- 日期切换 -->
       <nav class="datebar">
         <button class="icon-btn" id="prev-day" aria-label="前一天">‹</button>
-        <label class="date-pill" id="date-pill">
+        <button type="button" class="date-pill" id="date-pill" aria-haspopup="dialog">
           <span id="date-pill-text">今天</span>
-          <input type="date" id="date-input" aria-label="选择日期" />
-        </label>
+        </button>
         <button class="icon-btn" id="next-day" aria-label="后一天">›</button>
       </nav>
 
@@ -153,10 +152,9 @@
         <input id="add-input" type="text" placeholder="添加一件要做的事…（可用 #标签）"
                maxlength="500" enterkeyhint="done" aria-label="新增任务" />
         <div class="composer-foot">
-          <label class="composer-date" id="composer-date" title="任务归属日期">
+          <button type="button" class="composer-date" id="composer-date" aria-haspopup="dialog" title="任务归属日期">
             <span id="composer-date-text">今天</span>
-            <input type="date" id="composer-date-input" aria-label="选择归属日期" />
-          </label>
+          </button>
           <span class="composer-spacer"></span>
           <p id="add-hint" class="add-hint" role="alert" hidden></p>
           <button type="submit" id="add-btn" class="btn primary small">添加</button>
@@ -381,6 +379,24 @@
       </section>
     </div>
   </aside>
+</div>
+
+<!-- ============================ 日期选择弹层 ============================ -->
+<div id="date-pop" class="date-pop hidden" role="dialog" aria-modal="false" aria-label="选择日期">
+  <div class="date-pop-head">
+    <button type="button" class="mini-btn" id="pop-prev-year" aria-label="上一年" title="上一年">«</button>
+    <button type="button" class="mini-btn" id="pop-prev-month" aria-label="上个月" title="上个月">‹</button>
+    <span id="pop-title" class="date-pop-title">—</span>
+    <button type="button" class="mini-btn" id="pop-next-month" aria-label="下个月" title="下个月">›</button>
+    <button type="button" class="mini-btn" id="pop-next-year" aria-label="下一年" title="下一年">»</button>
+  </div>
+  <div id="pop-grid" class="calendar pop-grid"></div>
+  <div class="date-pop-foot">
+    <button type="button" id="pop-clear" class="btn subtle small" title="恢复为原日期">清空</button>
+    <span class="date-pop-gap"></span>
+    <button type="button" id="pop-today" class="btn subtle small">今天</button>
+    <button type="button" id="pop-ok" class="btn primary small">确定</button>
+  </div>
 </div>
 
 <div id="toast-host" class="toast-host" aria-live="polite"></div>

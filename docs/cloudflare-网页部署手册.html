@@ -514,6 +514,29 @@
 </details>
 
 <details>
+  <summary>Git 自动部署时构建失败：<code>D1 binding 'DB' references database '…' which was not found [code: 10181]</code></summary>
+  <p>这是<strong>方案 B（Git 自动构建）</strong>的问题：仓库里 <code>wrangler.jsonc</code> 的
+     <code>database_id</code> 填的不是<strong>你自己账号</strong>里那个 D1 数据库的 ID
+     （这个 UUID 每个账号都不一样，不能从教程或别人的配置里照抄）。</p>
+  <p>正确的 ID 这样找：</p>
+  <ol>
+    <li>打开 Cloudflare 控制台左侧 <strong>存储和数据库 (Storage &amp; Databases) › D1 SQL Database</strong></li>
+    <li>点进你实际在用的 <code>todo-today</code> 数据库（拿不准就选之前线上已经在用的那个）</li>
+    <li>在<strong>概览页右侧</strong>找到 <strong>Database ID</strong>，点复制按钮</li>
+  </ol>
+  <p>然后到 GitHub 仓库里编辑 <code>wrangler.jsonc</code>，把 <code>database_id</code> 换成它并提交，
+     Workers Builds 会自动重新构建部署。</p>
+  <div class="callout warn">
+    <span class="t">别绑到一个新的空库上</span>
+    <p>如果你账号里有多个 D1，务必选<strong>线站在用的那个</strong>。
+       绑到新建的空库会「部署成功但数据全没了」，还得对新库补执行一遍 <code>schema.sql</code> 建表。</p>
+  </div>
+  <p>更稳的验证方法：<strong>Workers &amp; Pages</strong> → 点进 Worker ›
+     <strong>Settings › Bindings（绑定）</strong>，看 <code>DB</code> 这条 D1 绑定指向的数据库名，
+     点进去复制它的 Database ID，保证两边是同一个库。</p>
+</details>
+
+<details>
   <summary>打开站点是空白页，或样式全部丢失</summary>
   <p>99% 是代码粘贴不完整。重新打开 <code>dist/worker.cloudflare-dashboard.js</code>，
      全选复制后，在在线编辑器里 <code>Ctrl+A</code> 全选覆盖 —— 不要手动滚动着补。</p>

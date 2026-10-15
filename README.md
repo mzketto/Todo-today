@@ -272,6 +272,12 @@ npx wrangler d1 execute todo-today --remote --file=./schema.sql
 
 > 注意别在「本地实例 / Local」里执行——要选远程的那个数据库，否则线上还是空表。
 
+**Q: Git 自动部署时报 `D1 binding 'DB' references database '…' which was not found [code: 10181]`？**
+仓库里 `wrangler.jsonc` 的 `database_id` 不是你账号里的 D1 数据库 ID（这个 UUID 每个账号不同，不能照抄别人的）。
+正确 ID 的位置：控制台 **存储和数据库 › D1 SQL Database** → 点进 `todo-today` → 概览页右侧 **Database ID** 复制，
+填回仓库的 `wrangler.jsonc` 并提交，Workers Builds 会自动重新部署。
+务必选线上在用的那个库——绑到新的空库会「部署成功但数据为空」，还要对新库补执行 `schema.sql`。
+
 **Q: 怎么确认后台是否健康？**
 访问 `/api/health` 看绑定，访问 `/api/health?check=1` 会真的连一次库并列出缺失的表。
 

@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>今日待办 · Cloudflare 网页控制台部署手册</title>
+<style>
+  :root {
+    --bg: #f6f7fb;
+    --paper: #ffffff;
+    --ink: #1b1d29;
+    --ink-2: #4d5266;
+    --ink-3: #7b8199;
+    --line: #e4e6f0;
+    --brand: #4f46c8;
+    --brand-soft: #eeecff;
+    --ok: #1f7a4d;
+    --ok-soft: #e7f6ee;
+    --warn: #9a6200;
+    --warn-soft: #fdf3e0;
+    --danger: #b3383a;
+    --danger-soft: #fdecec;
+    --code-bg: #f2f3f9;
+    --radius: 12px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1017; --paper: #171923; --ink: #eceef7; --ink-2: #b3b8cc; --ink-3: #828799;
+      --line: #2a2d3c; --brand: #9b96ff; --brand-soft: #23223c;
+      --ok: #62d39c; --ok-soft: #14291f; --warn: #e8b055; --warn-soft: #2b2317;
+      --danger: #f08c8c; --danger-soft: #2c1a1b; --code-bg: #1e202c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 860px; margin: 0 auto; padding: 40px 22px 96px; }
+
+  /* ---------- 封面 ---------- */
+  header.cover {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 18px;
+    padding: 34px 32px 30px; box-shadow: 0 1px 3px rgba(20,22,45,.05);
+  }
+  .kicker { font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--brand); margin: 0 0 10px; }
+  h1 { margin: 0 0 10px; font-size: 30px; line-height: 1.25; letter-spacing: -.01em; }
+  .lede { margin: 0; color: var(--ink-2); font-size: 14.5px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .meta div { background: var(--code-bg); border-radius: 8px; padding: 7px 12px; font-size: 12.5px; color: var(--ink-2); }
+  .meta b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- 结构 ---------- */
+  h2 {
+    font-size: 20px; margin: 44px 0 14px; padding-bottom: 10px;
+    border-bottom: 2px solid var(--line); letter-spacing: -.01em;
+  }
+  h3 { font-size: 15.5px; margin: 26px 0 8px; }
+  p { margin: 0 0 12px; }
+  a { color: var(--brand); }
+
+  .step {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 16px;
+    padding: 22px 24px 20px; margin: 0 0 16px; position: relative;
+  }
+  .step > h3 { margin: 0 0 4px; display: flex; align-items: center; gap: 10px; font-size: 17px; }
+  .num {
+    flex: none; width: 26px; height: 26px; border-radius: 50%;
+    background: var(--brand); color: #fff; font-size: 13px; font-weight: 700;
+    display: grid; place-items: center;
+  }
+  .step .goal { color: var(--ink-3); font-size: 13px; margin: 0 0 16px 36px; }
+
+  ol.acts { margin: 0; padding-left: 20px; }
+  ol.acts > li { margin-bottom: 9px; }
+  ul.tight { margin: 8px 0; padding-left: 20px; }
+  ul.tight > li { margin-bottom: 5px; }
+
+  /* ---------- 面包屑路径 ---------- */
+  .path {
+    display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px;
+    background: var(--brand-soft); border-radius: 8px; padding: 4px 10px;
+    font-size: 13px; font-weight: 600; color: var(--brand);
+  }
+  .path span.sep { opacity: .5; font-weight: 400; }
+
+  code {
+    font-family: var(--mono); font-size: .875em;
+    background: var(--code-bg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1.5px 5px; word-break: break-word;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 13px 15px; overflow-x: auto; margin: 10px 0; font-size: 12.8px; line-height: 1.6;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+  /* ---------- 提示框 ---------- */
+  .callout {
+    border-radius: var(--radius); padding: 12px 15px; margin: 14px 0;
+    font-size: 13.5px; border: 1px solid transparent;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .t { font-weight: 700; display: block; margin-bottom: 3px; }
+  .tip  { background: var(--ok-soft);     border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
+  .tip .t { color: var(--ok); }
+  .warn { background: var(--warn-soft);   border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
+  .warn .t { color: var(--warn); }
+  .danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 32%, transparent); }
+  .danger .t { color: var(--danger); }
+  .note { background: var(--code-bg);     border-color: var(--line); }
+  .note .t { color: var(--ink-2); }
+
+  /* ---------- 表格 ---------- */
+  .tw { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--code-bg); font-weight: 600; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td code { white-space: nowrap; }
+
+  /* ---------- 清单 ---------- */
+  .checklist { list-style: none; margin: 0; padding: 0; }
+  .checklist li {
+    position: relative; padding: 8px 0 8px 32px; border-bottom: 1px dashed var(--line); font-size: 14px;
+  }
+  .checklist li:last-child { border-bottom: none; }
+  .checklist li::before {
+    content: ""; position: absolute; left: 4px; top: 13px;
+    width: 15px; height: 15px; border: 2px solid var(--ink-3); border-radius: 4px;
+  }
+
+  details {
+    background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px 16px; margin-bottom: 9px;
+  }
+  details summary { cursor: pointer; font-weight: 600; font-size: 14.5px; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: "▸ "; color: var(--ink-3); }
+  details[open] summary::before { content: "▾ "; }
+  details[open] summary { margin-bottom: 8px; }
+  details > *:last-child { margin-bottom: 0; }
+
+  hr { border: none; border-top: 1px solid var(--line); margin: 40px 0; }
+
+  @media (max-width: 560px) {
+    .page { padding: 22px 14px 64px; }
+    header.cover { padding: 24px 18px; }
+    h1 { font-size: 23px; }
+    .step { padding: 18px 16px 16px; }
+    .step .goal { margin-left: 0; }
+  }
+
+  @media print {
+    :root { --bg:#fff; --paper:#fff; --ink:#000; --ink-2:#333; --ink-3:#666; --line:#ccc; --code-bg:#f5f5f5; }
+    body { background: #fff; }
+    .page { max-width: none; padding: 0; }
+    header.cover { box-shadow: none; }
+    .step, details { break-inside: avoid; }
+    h2 { break-after: avoid; }
+    details { border: none; padding: 0; }
+    details > summary { font-weight: 700; }
+    details:not([open]) > *:not(summary) { display: block !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="cover">
+  <p class="kicker">部署手册 · 网页版</p>
+  <h1>在 Cloudflare 网页控制台部署「今日待办」</h1>
+  <p class="lede">
+    全程只用浏览器，不安装任何命令行工具。按顺序做完 ① ~ ⑤ 即可上线，
+    预计 15 分钟。⑥ 之后的步骤按需选做。
+  </p>
+  <div class="meta">
+    <div>适用项目：<b>todo-today</b></div>
+    <div>部署目标：<b>Cloudflare Workers</b></div>
+    <div>数据存储：<b>Cloudflare D1</b></div>
+    <div>难度：<b>入门</b></div>
+    <div>费用：<b>免费额度内</b></div>
+  </div>
+</header>
+
+<h2 id="0-开始之前">0 · 开始之前</h2>
+
+<h3 id="你需要准备">你需要准备</h3>
+<ul class="tight">
+  <li>一个 Cloudflare 账号（<a href="https://dash.cloudflare.com/sign-up">dash.cloudflare.com</a> 免费注册，无需信用卡）</li>
+  <li>本项目的全部文件，其中两个文件会在下面被复制粘贴：
+    <ul class="tight">
+      <li><code>schema.sql</code> —— 数据库表结构</li>
+      <li><code>dist/worker.cloudflare-dashboard.js</code> —— 已经打包好的单文件版程序</li>
+    </ul>
+  </li>
+  <li>一个能打开这两个文件的文本编辑器（记事本、VS Code 都行）</li>
+</ul>
+
+<div class="callout note">
+  <span class="t">为什么是个「单文件」？</span>
+  Cloudflare 网页版的代码编辑器只能编辑<strong>一个文件</strong>，也没有上传静态网页
+  （HTML / CSS / JS）的入口。所以项目已经预先打包成 <code>worker.cloudflare-dashboard.js</code>：
+  它把后端代码和整个前端页面都装进了一个文件，Worker 会自己把网页返回给浏览器。
+  功能与命令行部署完全一致，只是少了一层目录拆分。
+</div>
+
+<h3 id="两种部署方式怎么选">两种部署方式怎么选</h3>
+<div class="tw">
+<table>
+  <thead>
+    <tr><th></th><th>方案 A · 网页控制台（本手册）</th><th>方案 B · Git 自动构建</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>需要命令行</td><td>不需要</td><td>不需要，但需要一个 GitHub 仓库</td></tr>
+    <tr><td>代码更新</td><td>手动重新粘贴一次代码</td><td>推送代码后自动部署</td></tr>
+    <tr><td>适合</td><td>先跑起来、个人使用、不想碰命令行</td><td>长期维护、多人协作</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="font-size:13px;color:var(--ink-3)">
+  方案 B 见文末附录 B。两条路用的是同一份源码，可以先用方案 A 上线，日后再迁到方案 B。
+</p>
+
+<h2 id="①-创建数据库-d1">① 创建数据库（D1）</h2>
+
+<div class="step">
+  <h3 id="1新建-d1-数据库"><span class="num">1</span>新建 D1 数据库</h3>
+  <p class="goal">目标：得到一个空的 SQL 数据库，用来存账号和待办。</p>
+  <ol class="acts">
+    <li>登录 <a href="https://dash.cloudflare.com">dash.cloudflare.com</a>。</li>
+    <li>在左侧导航进入 <span class="path">Workers &amp; Pages<span class="sep">›</span>D1 SQL 数据库</span>
+        （英文界面是 <em>Storage &amp; Databases › D1 SQL Database</em>）。</li>
+    <li>点 <strong>Create database / 创建数据库</strong>。</li>
+    <li>名称填 <code>todo-today</code>，点创建。</li>
+  </ol>
+  <div class="callout tip">
+    <span class="t">创建后请留在当前页面</span>
+    下一步要在这个数据库的 <strong>Console（控制台）</strong> 里执行建表语句。
+  </div>
+</div>
+
+<div class="step">
+  <h3 id="2执行建表语句"><span class="num">2</span>执行建表语句</h3>
+  <p class="goal">目标：把 users / sessions / todos / settings 四张表建出来。</p>
+  <ol class="acts">
+    <li>用文本编辑器打开项目里的 <code>schema.sql</code>，<strong>全选并复制</strong>全文。</li>
+    <li>回到 D1 数据库页面，切换到 <strong>Console / 控制台</strong> 标签页。</li>
+    <li>把 SQL 粘贴到输入框，点 <strong>Execute / 执行</strong>。</li>
+    <li>看到执行成功的提示后，切到 <strong>Tables / 表</strong> 标签确认，
+        应该能看到 4 张表：<code>users</code>、<code>sessions</code>、<code>todos</code>、<code>settings</code>。</li>
+  </ol>
+  <div class="callout warn">
+    <span class="t">这段 SQL 可以重复执行</span>
+    全部语句都带 <code>IF NOT EXISTS</code>，重复执行不会报错、也不会清空已有数据。
+  </div>
+  <div class="callout danger">
+    <span class="t">务必确认执行的是「远程」数据库</span>
+    Console 页面上会标注当前目标（<strong>Remote / 远程</strong> 还是 <strong>Local / 本地实例</strong>），
+    请确保是远程。如果建成了本地表，线上注册时依然会报
+    <code>no such table: users</code>。等后面把 Worker 部署上线后，可以访问
+    <code>https://你的地址/api/health?check=1</code> 复核，看到
+    <code>"schema":{"ok":true,...}</code> 才算真的建好了。
+  </div>
+</div>
+
+<h2 id="②-创建-worker-并粘贴代码">② 创建 Worker 并粘贴代码</h2>
+
+<div class="step">
+  <h3 id="3创建一个空-worker"><span class="num">3</span>创建一个空 Worker</h3>
+  <p class="goal">目标：先拿到一个占位的 Worker，再去编辑它的代码。</p>
+  <ol class="acts">
+    <li>左侧导航进入 <span class="path">Workers &amp; Pages</span>。</li>
+    <li>点 <strong>Create application / 创建应用程序</strong>。</li>
+    <li>选择 <strong>Create Worker / 创建 Worker</strong>（页面上通常写作
+        <em>Start with Hello World!</em>，或从模板列表里选 <em>Hello World</em>）。</li>
+    <li>名称填 <code>todo-today</code>，点 <strong>Deploy / 部署</strong>。</li>
+    <li>几秒后会得到一个地址，形如
+        <code>https://todo-today.你的子域.workers.dev</code>。<strong>先不用打开它</strong>，
+        此时它还是个 Hello World。</li>
+  </ol>
+</div>
+
+<div class="step">
+  <h3 id="4把单文件代码粘进去"><span class="num">4</span>把单文件代码粘进去</h3>
+  <p class="goal">目标：让 Worker 变成「今日待办」。</p>
+  <ol class="acts">
+    <li>在 Worker 详情页点 <strong>Edit code / 编辑代码</strong>，打开在线编辑器。</li>
+    <li>在编辑器里按 <code>Ctrl+A</code> 全选，<code>Delete</code> 清空默认的示例代码。</li>
+    <li>用文本编辑器打开 <code>dist/worker.cloudflare-dashboard.js</code>，
+        <code>Ctrl+A</code> 全选、<code>Ctrl+C</code> 复制。</li>
+    <li>回到在线编辑器，<code>Ctrl+V</code> 粘贴。</li>
+    <li>点右上角 <strong>Save and Deploy / 保存并部署</strong>。</li>
+    <li>打开 <code>https://todo-today.你的子域.workers.dev</code>，应该能看到登录界面。</li>
+  </ol>
+  <div class="callout warn">
+    <span class="t">必须粘贴完整，一行都不能少</span>
+    文件约 <strong>3600 行 / 240 KB</strong>，其中大量长字符串是内联进去的网页文件。
+    如果粘贴后页面显示空白或样式全丢，多半是复制不完整——重新全选复制一次即可。
+    粘贴后建议在编辑器里按 <code>Ctrl+End</code> 跳到文件末尾，
+    确认最后一行是 <code>};</code> 且不是半截内容。
+  </div>
+  <div class="callout tip">
+    <span class="t">现在登录会报错，这是正常的</span>
+    此时数据库还没绑定，接口会返回「未绑定 D1 数据库」。做完下一步就好了。
+  </div>
+</div>
+
+<h2 id="③-绑定数据库">③ 绑定数据库</h2>
+
+<div class="step">
+  <h3 id="5把-d1-绑定到-worker"><span class="num">5</span>把 D1 绑定到 Worker</h3>
+  <p class="goal">目标：让 Worker 里的 <code>env.DB</code> 指向刚才创建的数据库。</p>
+  <ol class="acts">
+    <li>进入这个 Worker 的 <strong>Settings / 设置</strong> 页面。</li>
+    <li>找到 <strong>Bindings / 绑定</strong>，点 <strong>Add binding / 添加绑定</strong>。</li>
+    <li>类型选 <strong>D1 database / D1 数据库</strong>。</li>
+    <li>
+      变量名称填 <code>DB</code>（<strong>必须完全一致，区分大小写</strong>）<br />
+      数据库选 <code>todo-today</code>
+    </li>
+    <li>保存。Cloudflare 会自动重新部署，大约 10 秒完成。</li>
+  </ol>
+  <div class="callout danger">
+    <span class="t">绑定名写错是最常见的失败原因</span>
+    必须是 <code>DB</code>。写成 <code>db</code>、<code>MY_DB</code>、<code>D1</code> 都不行，
+    页面会能打开但一操作就报错。
+  </div>
+  <p><strong>验证：</strong>浏览器打开
+    <code>https://todo-today.你的子域.workers.dev/api/health</code>，
+    看到 <code>{"ok":true,...,"db":true,...}</code> 就说明绑定成功了。</p>
+</div>
+
+<h2 id="④-设置环境变量">④ 设置环境变量</h2>
+
+<div class="step">
+  <h3 id="6添加变量-可选但建议"><span class="num">6</span>添加变量（可选但建议）</h3>
+  <p class="goal">目标：配置站点名称，并决定是否开放注册。</p>
+  <ol class="acts">
+    <li>Worker 的 <strong>Settings / 设置</strong> 页面，找到
+        <strong>Variables and Secrets / 变量和机密</strong>。</li>
+    <li>点 <strong>Add / 添加</strong>，按下面的表填，类型都选 <strong>Text / 文本</strong>。</li>
+    <li>保存并等待自动重新部署。</li>
+  </ol>
+  <div class="tw">
+  <table>
+    <thead><tr><th>变量名</th><th>值</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>APP_NAME</code></td><td><code>今日待办</code></td><td>健康检查接口里显示的站点名</td></tr>
+      <tr><td><code>ALLOW_REGISTRATION</code></td><td><code>true</code> / <code>false</code></td><td>设为 <code>false</code> 即关闭注册</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout tip">
+    <span class="t">只想自己用？</span>
+    先保持 <code>ALLOW_REGISTRATION=true</code> 注册好你自己的账号，再把它改成 <code>false</code>。
+    之后任何人都无法再注册。
+  </div>
+</div>
+
+<h2 id="⑤-上线检查">⑤ 上线检查</h2>
+
+<div class="step">
+  <h3 id="7走一遍完整流程"><span class="num">7</span>走一遍完整流程</h3>
+  <p class="goal">目标：确认所有功能都正常。</p>
+  <ul class="checklist">
+    <li>访问 <code>/api/health?check=1</code> → 返回
+        <code>"schema":{"ok":true,"missing":[]}</code>（<strong>最先验这个</strong>，
+        能一次性排掉「没建表」「绑定名写错」两类问题）</li>
+    <li>打开站点，能看到「今日待办」的登录界面，并且底部是「登录 / 注册」两个标签页</li>
+    <li>切到「注册」，用任意用户名 + 6 位以上密码创建账号 → 成功进入主界面</li>
+    <li>在输入框输入一件事，回车 → 列表出现这条待办，底部计数变成「1 项待完成」</li>
+    <li>输入框只敲空格再回车 → 提示「任务内容不能为空」，<strong>没有新增任何任务</strong></li>
+    <li>点任务前面的圆圈 → 变成勾选状态并沉到列表底部，计数减 1</li>
+    <li>点任务右侧的垃圾桶图标 → 该条消失，计数同步变化</li>
+    <li>点右上角头像打开设置抽屉 → 能看到「当前账号」是你的用户名</li>
+    <li>用手机浏览器打开同一地址 → 布局正常、按钮好点</li>
+    <li>刷新页面 → 刚才的待办还在（说明数据库写入成功）</li>
+    <li>退出登录再重新登录 → 数据仍在</li>
+  </ul>
+</div>
+
+<h2 id="⑥-可选-配置云备份">⑥ 可选：配置云备份</h2>
+
+<p style="color:var(--ink-2);font-size:14px">
+  主线功能到上一步就完成了。下面是可选的「再存一份到别处」，三种方式选一种即可。
+  无论选哪种，都是在站点的<strong>设置抽屉 → 云备份</strong>里填。
+</p>
+
+<div class="step">
+  <h3 id="acloudflare-r2-原生绑定-无需密钥"><span class="num">A</span>Cloudflare R2（原生绑定，无需密钥）</h3>
+  <p class="goal">目标：把备份写进 R2 存储桶。</p>
+  <ol class="acts">
+    <li>左侧导航进入 <span class="path">R2 对象存储<span class="sep">›</span>创建存储桶</span>。</li>
+    <li>存储桶名称填 <code>todo-backups</code>，创建。</li>
+    <li>回到 Worker 的 <strong>Settings / 设置 › Bindings / 绑定</strong>，
+        点 <strong>Add binding / 添加绑定</strong>。</li>
+    <li>类型选 <strong>R2 bucket / R2 存储桶</strong>。</li>
+    <li>
+      变量名称填 <code>BACKUPS</code>（<strong>必须完全一致</strong>）<br />
+      R2 存储桶选 <code>todo-backups</code>
+    </li>
+    <li>保存并等待重新部署。</li>
+    <li>打开站点 → 右上角头像 → <strong>云备份</strong>：
+      <ul class="tight">
+        <li>备份方式选 <strong>Cloudflare R2（原生绑定）</strong></li>
+        <li>打开「启用云备份」，按需打开「变更后自动备份」</li>
+        <li>点 <strong>保存配置</strong>，再点 <strong>测试连接</strong>，最后点 <strong>立即备份</strong></li>
+      </ul>
+    </li>
+  </ol>
+  <div class="callout note">
+    <span class="t">自动备份有节流</span>
+    开启「变更后自动备份」后，每 60 秒最多上传一次，避免频繁改动把请求配额打满。
+  </div>
+</div>
+
+<div class="step">
+  <h3 id="bs3-兼容对象存储-含-r2-aws-minio-阿里云-oss-等"><span class="num">B</span>S3 兼容对象存储（含 R2 / AWS / MinIO / 阿里云 OSS 等）</h3>
+  <p class="goal">目标：用密钥直连任意 S3 兼容服务。</p>
+  <p>在站点的<strong>设置抽屉 → 云备份</strong>里选「S3 兼容对象存储」，按下表填写：</p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>字段</th><th>怎么填</th></tr></thead>
+    <tbody>
+      <tr><td>Endpoint 服务地址</td><td>例如 R2：<code>https://&lt;账户ID&gt;.r2.cloudflarestorage.com</code><br>MinIO：<code>http://你的域名:9000</code></td></tr>
+      <tr><td>Region</td><td>R2 填 <code>auto</code>；AWS 填真实区域如 <code>us-east-1</code></td></tr>
+      <tr><td>Bucket</td><td>你的桶名，例如 <code>todo-backups</code></td></tr>
+      <tr><td>Access Key ID / Secret</td><td>在对应平台的 API 令牌页面生成</td></tr>
+      <tr><td>路径前缀 / 文件名</td><td>可留空，默认写 <code>todo-today.backup.json</code></td></tr>
+      <tr><td>Path-Style</td><td>MinIO 等自建服务一般勾上；AWS 与 R2 不勾</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>填完依次点 <strong>保存配置 → 测试连接 → 立即备份</strong>。</p>
+  <div class="callout tip">
+    <span class="t">密钥也可以放在 Worker 里</span>
+    如果不想把 Secret Key 存在页面上，可以留空，改为在 Worker 的
+    <strong>Variables and Secrets</strong> 里添加一个<strong>加密</strong>类型的
+    <code>BACKUP_S3_SECRET_KEY</code>。页面留空时会自动回落到它。
+  </div>
+</div>
+
+<div class="step">
+  <h3 id="cwebdav-坚果云-nextcloud-群晖等"><span class="num">C</span>WebDAV（坚果云 / Nextcloud / 群晖等）</h3>
+  <p class="goal">目标：备份到自己的网盘目录。</p>
+  <p>在<strong>设置抽屉 → 云备份</strong>里选「WebDAV」，填写：</p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>字段</th><th>怎么填</th></tr></thead>
+    <tbody>
+      <tr><td>WebDAV 目录地址</td><td>坚果云：<code>https://dav.jianguoyun.com/dav/我的坚果云/todo</code><br>Nextcloud：<code>https://cloud.示例.com/remote.php/dav/files/&lt;用户名&gt;/todo</code></td></tr>
+      <tr><td>用户名</td><td>你的登录邮箱 / 用户名</td></tr>
+      <tr><td>密码</td><td>坚果云需在「账户信息 → 安全选项」里生成<strong>应用密码</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="callout warn">
+    <span class="t">目录必须已经存在</span>
+    WebDAV 一般不会自动创建目录，请先在网盘里手动建好那个文件夹。
+    密码同样可以留空，改用 Worker 机密 <code>BACKUP_WEBDAV_PASSWORD</code>。
+  </div>
+</div>
+
+<h2 id="⑦-可选-绑定自己的域名">⑦ 可选：绑定自己的域名</h2>
+
+<div class="step">
+  <h3 id="用自定义域名访问"><span class="num">＋</span>用自定义域名访问</h3>
+  <ol class="acts">
+    <li>Worker 的 <strong>Settings / 设置</strong> 页面，找到 <strong>Domains &amp; Routes / 域和路由</strong>。</li>
+    <li>点 <strong>Add / 添加 › Custom domain / 自定义域</strong>。</li>
+    <li>输入你想用的域名，例如 <code>todo.你的域名.com</code>，确认。</li>
+  </ol>
+  <p>域名的 DNS 需要托管在 Cloudflare（在 Cloudflare 里添加站点并改好 NS 即可），
+     证书由 Cloudflare 自动签发，无需额外操作。</p>
+</div>
+
+<h2 id="⑧-以后怎么更新代码">⑧ 以后怎么更新代码</h2>
+
+<p>如果你改动了 <code>src/</code> 或 <code>public/</code> 里的源码，需要重新生成单文件并替换：</p>
+<ol class="acts">
+  <li>在有 Node.js 的电脑上，进入项目目录执行：<br>
+      <code>npm run build:dashboard</code></li>
+  <li>重新打开 <code>dist/worker.cloudflare-dashboard.js</code> 复制全文。</li>
+  <li>Cloudflare 控制台 → 该 Worker → <strong>Edit code / 编辑代码</strong>。</li>
+  <li><code>Ctrl+A</code> 全选清空，粘贴新代码，点 <strong>Save and Deploy</strong>。</li>
+</ol>
+<div class="callout note">
+  <span class="t">只是想改网页样式或文案？</span>
+  同样要走这个流程——前端文件是被打包进 Worker 的，不是独立上传的。
+</div>
+
+<h2 id="常见问题">常见问题</h2>
+
+<details open>
+  <summary>注册时提示 <code>D1_ERROR: no such table: users: SQLITE_ERROR</code></summary>
+  <p>这是<strong>最常见</strong>的一个问题：数据库本身建好了、也绑上了，但库里还是空的 ——
+     也就是<strong>第 ② 步的建表没做，或者做在了本地实例上</strong>。</p>
+  <p>回到 <strong>D1</strong> → 点进你的 <code>todo-today</code> 数据库 →
+     切到 <strong>Console（控制台）</strong> 标签页 → 把项目里的 <code>schema.sql</code>
+     全文粘进输入框 → 点 <strong>Execute（执行）</strong>。</p>
+  <p>执行完刷新页面重新注册即可。想确认是否成功，访问
+     <code>https://你的地址/api/health?check=1</code>，看到下面这样就说明表齐了：</p>
+  <pre><code>{"ok":true,"db":true,"schema":{"ok":true,"tables":["users","sessions","todos","settings"],"missing":[]}}</code></pre>
+  <div class="callout warn">
+    <span class="t">注意别执行到本地实例上</span>
+    <p>Database 的 Console 里不要选成 <strong>Local / 本地实例</strong>，
+       要选<strong>远程的那个数据库</strong>，否则线上依然是空表。页面上会标注当前的执行目标是本地还是远程。</p>
+  </div>
+</details>
+
+<details>
+  <summary>打开站点是空白页，或样式全部丢失</summary>
+  <p>99% 是代码粘贴不完整。重新打开 <code>dist/worker.cloudflare-dashboard.js</code>，
+     全选复制后，在在线编辑器里 <code>Ctrl+A</code> 全选覆盖 —— 不要手动滚动着补。</p>
+</details>
+
+<details>
+  <summary>页面能打开，但一注册就提示「未绑定 D1 数据库」</summary>
+  <p>说明第 ③ 步的绑定没做或名称不对。检查
+     <strong>Settings › Bindings</strong> 里的变量名是否<strong>精确等于</strong>
+     <code>DB</code>（大写，无空格）。</p>
+  <p>注意和上一条区别开：报 <code>未绑定 D1 数据库</code> 是<strong>没连上库</strong>；
+     报 <code>no such table</code> 是<strong>连上了但没建表</strong>。</p>
+</details>
+
+<details>
+  <summary>设置里开了「定时备份」，但一直提示「还没收到定时任务的心跳」</summary>
+  <p>定时备份靠 <strong>Cron Triggers（定时触发器）</strong>驱动，代码部署后还要加一条触发规则：</p>
+  <ol>
+    <li>打开 <strong>Workers &amp; Pages</strong> → 点进你的 Worker（<code>todo-today</code>）</li>
+    <li><strong>Settings › Triggers（触发事件）</strong></li>
+    <li>在 <strong>Cron Triggers</strong> 里点 <strong>Add Cron Trigger</strong></li>
+    <li>填入 <code>*/5 * * * *</code>（意思是每 5 分钟唤醒一次），保存</li>
+  </ol>
+  <p>加好之后回到应用的设置页，等最多 5 分钟，「定时任务运行正常（上次检查 x 分钟前）」就说明生效了。
+     备份周期本身（每 15 分钟 / 每小时 / 每天……）在<strong>应用内设置</strong>里选，不需要改这条 Cron。</p>
+  <div class="callout note">
+    <span class="t">只想用「变更后自动备份」的话</span>
+    不加这条 Cron 也完全没关系——那个功能由你的操作触发，不依赖定时器。
+  </div>
+</details>
+
+<details>
+  <summary>怎么快速确认后端是否正常？</summary>
+  <p>访问 <code>https://你的地址/api/health</code>。正常会返回类似：</p>
+  <pre><code>{"ok":true,"app":"今日待办","db":true,"r2":false,"registration":true}</code></pre>
+  <p><code>db:false</code> 表示 D1 没绑上；<code>r2:false</code> 只是说明没配 R2 备份，不影响使用。</p>
+  <p>加上 <code>?check=1</code> 则会真的连一次数据库，并把缺失的数据表列出来 ——
+     部署完自查时建议用这个：<code>/api/health?check=1</code>。</p>
+</details>
+
+<details>
+  <summary>提示兼容性日期相关的问题</summary>
+  <p>在 Worker 的 <strong>Settings › Runtime / 运行时</strong> 里把
+     <strong>Compatibility date / 兼容性日期</strong> 设为 <code>2025-05-01</code> 或更晚，保存后重新部署。</p>
+</details>
+
+<details>
+  <summary>云备份报「未绑定 R2 存储桶」</summary>
+  <p>要么去第 ⑥-A 步添加 R2 绑定（变量名必须是 <code>BACKUPS</code>），
+     要么把备份方式改成 S3 或 WebDAV。三种方式任选其一，不必都配。</p>
+</details>
+
+<details>
+  <summary>「测试连接」失败怎么办？</summary>
+  <ul class="tight">
+    <li>S3：检查 Endpoint 是否多了结尾斜杠、Bucket 名是否正确、Region 对 R2 必须是 <code>auto</code>；自建 MinIO 记得勾 Path-Style。</li>
+    <li>WebDAV：检查目录地址是否已存在、密码是否用了「应用密码」而不是登录密码。</li>
+    <li>跨域的报错信息会直接显示在设置抽屉下方的状态行里，按提示排查即可。</li>
+  </ul>
+</details>
+
+<details>
+  <summary>我能不能用命令行部署？</summary>
+  <p>可以，Web 控制台部署和命令行部署用的是同一份源码，互不影响。
+     命令行的步骤见项目根目录 <code>README.md</code> 的「部署到 Cloudflare」一节，
+     那种方式还支持配置静态资源目录，属于另一种部署形态。</p>
+</details>
+
+<hr />
+
+<h2 id="附录-a-所有名称对照表">附录 A · 所有名称对照表</h2>
+<p>下面这些名字必须一字不差，建议部署时对照本表逐个核对。</p>
+<div class="tw">
+<table>
+  <thead><tr><th>类型</th><th>名称</th><th>在哪里设置</th></tr></thead>
+  <tbody>
+    <tr><td>D1 绑定</td><td><code>DB</code></td><td>Worker › Settings › Bindings</td></tr>
+    <tr><td>R2 绑定（可选）</td><td><code>BACKUPS</code></td><td>Worker › Settings › Bindings</td></tr>
+    <tr><td>变量</td><td><code>APP_NAME</code></td><td>Worker › Settings › Variables and Secrets</td></tr>
+    <tr><td>变量</td><td><code>ALLOW_REGISTRATION</code></td><td>Worker › Settings › Variables and Secrets</td></tr>
+    <tr><td>机密（可选）</td><td><code>BACKUP_S3_SECRET_KEY</code></td><td>Worker › Settings › Variables and Secrets（加密）</td></tr>
+    <tr><td>机密（可选）</td><td><code>BACKUP_WEBDAV_PASSWORD</code></td><td>Worker › Settings › Variables and Secrets（加密）</td></tr>
+    <tr><td>数据库名</td><td><code>todo-today</code></td><td>D1 SQL 数据库</td></tr>
+    <tr><td>存储桶名（可选）</td><td><code>todo-backups</code></td><td>R2 对象存储</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="附录-b-方案-b-用-git-自动构建">附录 B · 方案 B：用 Git 自动构建</h2>
+<p>适合需要长期维护的场景。代价是需要一个 GitHub 账号和仓库。</p>
+<ol class="acts">
+  <li>把整个项目（不含 <code>node_modules</code> 和 <code>dist</code>）推送到 GitHub 仓库。</li>
+  <li>先在网页控制台按第 ① 步创建 D1 数据库，复制它的 <strong>Database ID</strong>。</li>
+  <li>把该 ID 填进仓库里的 <code>wrangler.jsonc</code> 的 <code>database_id</code> 字段并提交。</li>
+  <li>网页控制台进入 <span class="path">Workers &amp; Pages<span class="sep">›</span>创建应用程序</span>，
+      选 <strong>Import a repository / 导入存储库</strong>，授权并选中该仓库。</li>
+  <li>构建配置保持默认（Cloudflare 会自动识别 <code>wrangler.jsonc</code> 并执行 <code>wrangler deploy</code>），点部署。</li>
+  <li>之后每次 <code>git push</code> 都会自动构建并上线，无需再手工粘贴代码。</li>
+</ol>
+<div class="callout note">
+  <span class="t">这种方式还多一个好处</span>
+  它支持在 <code>wrangler.jsonc</code> 里声明 <code>assets</code> 静态资源目录，
+  网页资源由 Cloudflare 的 CDN 直接托管，比打包进 Worker 更快。
+  用这种方式时，第 ② 步的「粘贴单文件代码」可以整步跳过。
+</div>
+
+<hr />
+<p style="font-size:12.5px;color:var(--ink-3);text-align:center;margin-top:28px">
+  今日待办 · Cloudflare 网页控制台部署手册 &nbsp;|&nbsp;
+  与项目源码同步维护，如界面文案有出入，以 Cloudflare 控制台实际显示为准
+</p>
+
+</div>
+</body>
+</html>

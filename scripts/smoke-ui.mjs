@@ -158,6 +158,59 @@ await sleep(350);
 const navTitle = await evalJs(`document.getElementById('page-title').textContent`);
 check(`左右切换日期：${navTitle}`, navTitle === '今天');
 
+// 10) 自定义日期选择弹层：打开 → 翻月 → 选日 → 确定
+await evalJs(`document.getElementById('date-pill').click()`);
+await sleep(300);
+const popOpen = await evalJs(`(() => {
+  const pop = document.getElementById('date-pop');
+  return { visible: !pop.classList.contains('hidden'), title: document.getElementById('pop-title').textContent };
+})()`);
+check(`弹层打开：${popOpen.title}`, popOpen.visible && /年.*月/.test(popOpen.title));
+
+await evalJs(`document.getElementById('pop-prev-month').click()`);
+await evalJs(`document.getElementById('pop-prev-month').click()`);
+await sleep(200);
+const popTitle2 = await evalJs(`document.getElementById('pop-title').textContent`);
+check(`翻月：${popTitle2}`, popTitle2.includes('8 月') || popTitle2.includes('09') || /\d+ 年 \d+ 月/.test(popTitle2));
+
+await evalJs(`(() => {
+  const day = [...document.querySelectorAll('#pop-grid .cal-day')].find((b) => b.textContent.trim() === '15' && !b.className.includes('is-outside'));
+  day.click();
+})()`);
+await sleep(300);
+const pickedTitle = await evalJs(`document.getElementById('page-title').textContent`);
+const popStill = await evalJs(`!document.getElementById('date-pop').classList.contains('hidden')`);
+check(`选 15 号即时生效：标题=${pickedTitle}，弹层仍在=${popStill}`, pickedTitle.includes('15') && popStill);
+
+await evalJs(`document.getElementById('pop-ok').click()`);
+await sleep(200);
+const popClosed = await evalJs(`document.getElementById('date-pop').classList.contains('hidden')`);
+check(`确定关闭弹层`, popClosed);
+
+// 11) 清空 = 恢复原日期：打开 → 翻下月点 1 号 → 清空 → 回到原日期
+await evalJs(`document.getElementById('date-pill').click()`);
+await sleep(250);
+await evalJs(`document.getElementById('pop-next-month').click()`);
+await evalJs(`(() => {
+  const day = [...document.querySelectorAll('#pop-grid .cal-day')].find((b) => b.textContent.trim() === '1' && !b.className.includes('is-outside'));
+  day.click();
+})()`);
+await sleep(250);
+const afterPick = await evalJs(`document.getElementById('page-title').textContent`);
+await evalJs(`document.getElementById('pop-clear').click()`);
+await sleep(250);
+const afterClear = await evalJs(`document.getElementById('page-title').textContent`);
+check(`清空恢复原日期：${afterPick} → ${afterClear}`, afterPick !== afterClear && (afterClear === '今天' || afterClear === pickedTitle));
+
+// 12) 「今天」快捷键
+await evalJs(`document.getElementById('date-pill').click()`);
+await sleep(250);
+await evalJs(`document.getElementById('pop-today').click()`);
+await sleep(300);
+const backToday = await evalJs(`document.getElementById('page-title').textContent`);
+const popClosed2 = await evalJs(`document.getElementById('date-pop').classList.contains('hidden')`);
+check(`「今天」快捷选中：${backToday}`, backToday === '今天' && popClosed2);
+
 const fetchCount = await evalJs(`window.__fetchLog.length`);
 console.log(results.map(([s, n]) => `${s}  ${n}`).join('\n'));
 console.log(`fetch 调用 ${fetchCount} 次，console 错误 ${consoleErrors.length} 个`);
