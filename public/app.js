@@ -1,0 +1,1092 @@
+/* ============================================================
+ * 今日待办 · 前端逻辑（零依赖，无构建）
+ *
+ *  - 默认走真实后端 /api/*
+ *  - 若检测到后端不可用（例如直接打开静态文件预览），自动降级为
+ *    「演示模式」，用 localStorage 模拟完整后端，方便本地查看界面。
+ * ============================================================ */
+
+(() => {
+  'use strict';
+
+  const API_BASE = '/api';
+  const APP_VERSION = '1.0.0';
+  const URL_PARAMS = new URLSearchParams(location.search);
+  /** ?demo=1 直接进入演示模式并灌入示例数据，用于无后端时预览界面 */
+  const FORCE_DEMO = URL_PARAMS.get('demo') === '1';
+
+  /* ------------------------------------------------------------------ *
+   * DOM 引用
+   * ------------------------------------------------------------------ */
+  const $ = (id) => document.getElementById(id);
+
+  const el = {
+    boot: $('boot'),
+    authView: $('auth-view'),
+    mainView: $('main-view'),
+    authForm: $('auth-form'),
+    authUsername: $('auth-username'),
+    authPassword: $('auth-password'),
+    authError: $('auth-error'),
+    authSubmit: $('auth-submit'),
+    authSubmitLabel: $('auth-submit-label'),
+    togglePassword: $('toggle-password'),
+    tabs: Array.from(document.querySelectorAll('.tab')),
+
+    pageTitle: $('page-title'),
+    pageDate: $('page-date'),
+    themeToggle: $('theme-toggle'),
+    userMenu: $('user-menu'),
+    userInitial: $('user-initial'),
+    demoBanner: $('demo-banner'),
+    demoBannerClose: $('demo-banner-close'),
+
+    prevDay: $('prev-day'),
+    nextDay: $('next-day'),
+    datePill: $('date-pill'),
+    datePillText: $('date-pill-text'),
+    dateInput: $('date-input'),
+
+    addForm: $('add-form'),
+    addInput: $('add-input'),
+    addHint: $('add-hint'),
+
+    list: $('todo-list'),
+    emptyState: $('empty-state'),
+    remainingCount: $('remaining-count'),
+    remainingLabel: $('remaining-label'),
+    carryoverBtn: $('carryover-btn'),
+    clearDoneBtn: $('clear-done-btn'),
+
+    drawerMask: $('drawer-mask'),
+    drawerClose: $('drawer-close'),
+    accountName: $('account-name'),
+    logoutBtn: $('logout-btn'),
+
+    pwdCurrent: $('pwd-current'),
+    pwdNew: $('pwd-new'),
+    pwdSubmit: $('pwd-submit'),
+
+    backupProvider: $('backup-provider'),
+    backupEnabled: $('backup-enabled'),
+    backupAuto: $('backup-auto'),
+    backupPanels: Array.from(document.querySelectorAll('.provider-panel')),
+    r2Key: $('r2-key'),
+    s3Endpoint: $('s3-endpoint'),
+    s3Region: $('s3-region'),
+    s3Bucket: $('s3-bucket'),
+    s3Akid: $('s3-akid'),
+    s3Secret: $('s3-secret'),
+    s3Prefix: $('s3-prefix'),
+    s3File: $('s3-file'),
+    s3PathStyle: $('s3-pathstyle'),
+    davUrl: $('dav-url'),
+    davUser: $('dav-user'),
+    davPass: $('dav-pass'),
+    davFile: $('dav-file'),
+    backupTest: $('backup-test'),
+    backupSave: $('backup-save'),
+    backupRun: $('backup-run'),
+    backupRestore: $('backup-restore'),
+    backupStatus: $('backup-status'),
+    lastBackupLine: $('last-backup-line'),
+
+    exportBtn: $('export-btn'),
+    importBtn: $('import-btn'),
+    importFile: $('import-file'),
+    aboutVersion: $('about-version'),
+
+    toastHost: $('toast-host'),
+  };
+
+  /* ------------------------------------------------------------------ *
+   * 应用状态
+   * ------------------------------------------------------------------ */
+  const state = {
+    user: null,
+    date: todayStr(),
+    todos: [],
+    remaining: 0,
+    total: 0,
+    authMode: 'login',
+    demo: false,
+    apiConfirmed: false,
+    busy: false,
+  };
+
+  /* ------------------------------------------------------------------ *
+   * 工具函数
+   * ------------------------------------------------------------------ */
+  function pad(n) { return String(n).padStart(2, '0'); }
+
+  function todayStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function shiftDate(dateStr, delta) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + delta);
+    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
+  }
+
+  const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+  function humanDate(dateStr) {
+    const today = todayStr();
+    if (dateStr === today) return { title: '今天', sub: `${dateStr} · ${WEEKDAYS[weekdayOf(dateStr)]}` };
+    if (dateStr === shiftDate(today, -1)) return { title: '昨天', sub: `${dateStr} · ${WEEKDAYS[weekdayOf(dateStr)]}` };
+    if (dateStr === shiftDate(today, 1)) return { title: '明天', sub: `${dateStr} · ${WEEKDAYS[weekdayOf(dateStr)]}` };
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return { title: `${m} 月 ${d} 日`, sub: `${y}-${pad(m)}-${pad(d)} · ${WEEKDAYS[weekdayOf(dateStr)]}` };
+  }
+
+  function weekdayOf(dateStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, m - 1, d).getDay();
+  }
+
+  function toast(message, kind = '', duration = 2400) {
+    const node = document.createElement('div');
+    node.className = `toast ${kind}`;
+    node.textContent = message;
+    el.toastHost.appendChild(node);
+    setTimeout(() => {
+      node.classList.add('leaving');
+      setTimeout(() => node.remove(), 240);
+    }, duration);
+  }
+
+  function setStatus(node, text, kind = 'busy') {
+    if (!text) { node.hidden = true; node.textContent = ''; return; }
+    node.hidden = false;
+    node.className = `status-line ${kind}`;
+    node.textContent = text;
+  }
+
+  /** iframe 里 window.confirm 可能被拦截，改用「再点一次确认」 */
+  function armedClick(button, label, action) {
+    if (button.dataset.armed === '1') {
+      delete button.dataset.armed;
+      button.textContent = button.dataset.original || label;
+      return action();
+    }
+    button.dataset.original = button.dataset.original || button.textContent;
+    button.dataset.armed = '1';
+    button.textContent = label;
+    setTimeout(() => {
+      if (button.dataset.armed === '1') {
+        delete button.dataset.armed;
+        button.textContent = button.dataset.original;
+      }
+    }, 3200);
+    return undefined;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 演示模式：用 localStorage 模拟后端
+   * ------------------------------------------------------------------ */
+  const DEMO_KEY = 'todo-today:demo:v1';
+
+  function demoRead() {
+    try {
+      const raw = localStorage.getItem(DEMO_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch { /* ignore */ }
+    return { user: null, todos: [], backup: null };
+  }
+
+  function demoWrite(data) {
+    try { localStorage.setItem(DEMO_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+  }
+
+  function demoId() {
+    return `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function demoCount(todos, date) {
+    const list = todos.filter((t) => t.date === date);
+    return { remaining: list.filter((t) => !t.done).length, total: list.length };
+  }
+
+  function demoList(todos, date) {
+    return todos
+      .filter((t) => t.date === date)
+      .sort((a, b) => Number(a.done) - Number(b.done) || a.order - b.order || a.createdAt - b.createdAt);
+  }
+
+  function demoApi(path, { method = 'GET', body } = {}) {
+    const db = demoRead();
+    const [rawPath, query] = path.split('?');
+    const params = new URLSearchParams(query || '');
+    const seg = rawPath.split('/').filter(Boolean); // ['auth','me'] etc.
+    const jsonRes = (data, status = 200) => ({ ...data, __status: status });
+
+    /* --- auth --- */
+    if (seg[0] === 'auth') {
+      if (seg[1] === 'me') return { ok: true, user: db.user };
+      if (seg[1] === 'login' || seg[1] === 'register') {
+        const name = String(body?.username || '').trim();
+        const pass = String(body?.password || '');
+        if (name.length < 2) throw new ApiError('用户名至少 2 位');
+        if (pass.length < 6) throw new ApiError('密码至少 6 位');
+        db.user = { id: 'demo-user', username: name, createdAt: Math.floor(Date.now() / 1000) };
+        demoWrite(db);
+        return { ok: true, user: db.user };
+      }
+      if (seg[1] === 'logout') {
+        db.user = null;
+        demoWrite(db);
+        return { ok: true };
+      }
+      if (seg[1] === 'password') return { ok: true, message: '演示模式下不会真的改密码' };
+    }
+
+    if (!db.user) throw new ApiError('请先登录', 401);
+
+    /* --- todos --- */
+    if (seg[0] === 'todos') {
+      const date = params.get('date') || state.date;
+
+      if (!seg[1] && method === 'GET') {
+        return { ok: true, date, todos: demoList(db.todos, date), ...demoCount(db.todos, date) };
+      }
+
+      if (!seg[1] && method === 'POST') {
+        const title = String(body?.title || '').replace(/\s+/g, ' ').trim();
+        if (!title) throw new ApiError('任务内容不能为空');
+        const day = body?.date || date;
+        const minOrder = Math.min(0, ...db.todos.filter((t) => t.date === day).map((t) => t.order));
+        const todo = {
+          id: demoId(), title, done: false, date: day,
+          order: minOrder - 1, createdAt: Math.floor(Date.now() / 1000),
+        };
+        db.todos.push(todo);
+        demoWrite(db);
+        return { ok: true, todo, ...demoCount(db.todos, day), __status: 201 };
+      }
+
+      if (seg[1] === 'batch' && method === 'POST') {
+        const day = body?.date || date;
+        if (body?.action === 'clear-completed') {
+          const before = db.todos.length;
+          db.todos = db.todos.filter((t) => !(t.date === day && t.done));
+          demoWrite(db);
+          return { ok: true, removed: before - db.todos.length, ...demoCount(db.todos, day) };
+        }
+        if (body?.action === 'toggle-all') {
+          db.todos.forEach((t) => { if (t.date === day) t.done = !!body.done; });
+          demoWrite(db);
+          return { ok: true, ...demoCount(db.todos, day) };
+        }
+        if (body?.action === 'carry-over') {
+          let moved = 0;
+          const pending = body?.from
+            ? db.todos.filter((t) => t.date === body.from && !t.done)
+            : db.todos.filter((t) => t.date < day && !t.done);
+          let order = Math.min(0, ...db.todos.filter((t) => t.date === day).map((t) => t.order)) - 1;
+          pending.forEach((t) => { t.date = day; t.order = order--; moved += 1; });
+          demoWrite(db);
+          return { ok: true, moved, todos: demoList(db.todos, day), ...demoCount(db.todos, day) };
+        }
+        return { ok: true };
+      }
+
+      if (seg[1] === 'stats') {
+        const map = new Map();
+        db.todos.forEach((t) => {
+          const cur = map.get(t.date) || { date: t.date, remaining: 0, total: 0 };
+          cur.total += 1;
+          if (!t.done) cur.remaining += 1;
+          map.set(t.date, cur);
+        });
+        return { ok: true, stats: Array.from(map.values()).sort((a, b) => (a.date < b.date ? 1 : -1)) };
+      }
+
+      const id = seg[1];
+      const index = db.todos.findIndex((t) => t.id === id);
+      if (index === -1) throw new ApiError('任务不存在', 404);
+
+      if (method === 'PATCH') {
+        const t = db.todos[index];
+        if ('title' in (body || {})) {
+          const title = String(body.title).replace(/\s+/g, ' ').trim();
+          if (!title) throw new ApiError('任务内容不能为空');
+          t.title = title;
+        }
+        if ('done' in (body || {})) t.done = !!body.done;
+        if ('date' in (body || {})) t.date = body.date;
+        demoWrite(db);
+        return { ok: true, todo: t, ...demoCount(db.todos, t.date) };
+      }
+
+      if (method === 'DELETE') {
+        const [removed] = db.todos.splice(index, 1);
+        demoWrite(db);
+        return { ok: true, id: removed.id, ...demoCount(db.todos, removed.date) };
+      }
+    }
+
+    /* --- backup --- */
+    if (seg[0] === 'backup') {
+      if (seg[1] === 'config' && method === 'GET') {
+        return {
+          ok: true,
+          config: db.backup || {
+            provider: 'none', enabled: false, auto: false, file: 'todo-today.backup.json',
+            hasR2Binding: false,
+            s3: { endpoint: '', region: 'auto', bucket: '', accessKeyId: '', hasSecretKey: false, prefix: '', pathStyle: false },
+            webdav: { url: '', username: '', hasPassword: false, file: '' },
+          },
+          lastBackup: null,
+        };
+      }
+      if (seg[1] === 'config' && method === 'PUT') {
+        db.backup = { ...body, hasR2Binding: false };
+        demoWrite(db);
+        return { ok: true, config: db.backup };
+      }
+      if (seg[1] === 'test') return { ok: true, message: '演示模式：未真正连接云存储' };
+      if (seg[1] === 'run') return { ok: true, message: '演示模式：未真正上传' };
+      if (seg[1] === 'restore') return { ok: true, message: '演示模式：未真正下载' };
+    }
+
+    throw new ApiError(`演示模式暂不支持：${method} ${path}`, 404);
+  }
+
+  class ApiError extends Error {
+    constructor(message, status = 400) { super(message); this.status = status; }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 请求封装：真实后端优先，必要时降级演示模式
+   * ------------------------------------------------------------------ */
+  async function api(path, { method = 'GET', body } = {}) {
+    if (state.demo) return demoApi(path, { method, body });
+
+    let res;
+    try {
+      res = await fetch(API_BASE + path, {
+        method,
+        credentials: 'same-origin',
+        headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    } catch (networkError) {
+      if (!state.apiConfirmed) return fallbackToDemo(path, method, body);
+      throw new Error('网络异常，请检查连接后重试');
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      // 静态托管 / 后端未部署 —— 自动进入演示模式
+      if (!state.apiConfirmed) return fallbackToDemo(path, method, body);
+      throw new Error(`服务返回了非预期内容 (${res.status})`);
+    }
+
+    state.apiConfirmed = true;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      throw new ApiError(data.error || `请求失败 (${res.status})`, res.status);
+    }
+    return data;
+  }
+
+  function fallbackToDemo(path, method, body) {
+    enableDemoMode();
+    return demoApi(path, { method, body });
+  }
+
+  function enableDemoMode() {
+    if (state.demo) return;
+    state.demo = true;
+    el.demoBanner.classList.remove('hidden');
+    el.aboutVersion.textContent = `前端 v${APP_VERSION} · 演示模式`;
+    toast('未检测到后端服务，已切换到演示模式', '', 3200);
+  }
+
+  /** 演示用的示例数据，仅在 ?demo=1 首次进入时灌一次 */
+  function seedDemoData() {
+    const db = demoRead();
+    if (db.user) return;
+    const today = todayStr();
+    const samples = [
+      ['把季度汇报的提纲写完', false],
+      ['回复客户的邮件', true],
+      ['预约周五的体检', false],
+      ['晚上 8 点去健身房', false],
+    ];
+    db.user = { id: 'demo-user', username: 'demo', createdAt: Math.floor(Date.now() / 1000) };
+    db.todos = samples.map(([title, done], i) => ({
+      id: demoId(),
+      title,
+      done,
+      date: today,
+      order: i,
+      createdAt: Math.floor(Date.now() / 1000) + i,
+    }));
+    demoWrite(db);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 视图切换
+   * ------------------------------------------------------------------ */
+  function showAuth() {
+    el.boot.classList.add('hidden');
+    el.authView.classList.remove('hidden');
+    el.mainView.classList.add('hidden');
+    el.authUsername.focus({ preventScroll: true });
+  }
+
+  async function showMain() {
+    el.boot.classList.add('hidden');
+    el.authView.classList.add('hidden');
+    el.mainView.classList.remove('hidden');
+    el.userInitial.textContent = (state.user?.username || 'U').slice(0, 1).toUpperCase();
+    el.accountName.textContent = state.user?.username || '-';
+    await refresh();
+    await loadBackupConfig();
+    el.addInput.focus({ preventScroll: true });
+    // ?panel=settings 用于直接打开设置抽屉（演示/截图用）
+    if (URL_PARAMS.get('panel') === 'settings') openDrawer();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 认证
+   * ------------------------------------------------------------------ */
+  function setAuthMode(mode) {
+    state.authMode = mode;
+    el.tabs.forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
+    el.authSubmitLabel.textContent = mode === 'login' ? '登录' : '创建账号';
+    el.authPassword.setAttribute('autocomplete', mode === 'login' ? 'current-password' : 'new-password');
+    el.authError.hidden = true;
+    el.authPassword.value = '';
+  }
+
+  function showAuthError(message) {
+    el.authError.textContent = message;
+    el.authError.hidden = false;
+  }
+
+  el.tabs.forEach((tab) => tab.addEventListener('click', () => setAuthMode(tab.dataset.mode)));
+
+  el.togglePassword.addEventListener('click', () => {
+    const isPassword = el.authPassword.type === 'password';
+    el.authPassword.type = isPassword ? 'text' : 'password';
+    el.togglePassword.textContent = isPassword ? '🙈' : '👁';
+  });
+
+  el.authForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const username = el.authUsername.value.trim();
+    const password = el.authPassword.value;
+
+    if (!username) return showAuthError('请输入用户名');
+    if (password.length < 6) return showAuthError('密码至少 6 位');
+
+    el.authSubmit.disabled = true;
+    el.authSubmitLabel.textContent = state.authMode === 'login' ? '登录中…' : '创建中…';
+    el.authError.hidden = true;
+
+    try {
+      const data = await api(`/auth/${state.authMode}`, { method: 'POST', body: { username, password } });
+      state.user = data.user;
+      el.authPassword.value = '';
+      await showMain();
+    } catch (err) {
+      showAuthError(err.message || '操作失败');
+    } finally {
+      el.authSubmit.disabled = false;
+      el.authSubmitLabel.textContent = state.authMode === 'login' ? '登录' : '创建账号';
+    }
+  });
+
+  el.logoutBtn.addEventListener('click', async () => {
+    try { await api('/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+    state.user = null;
+    state.todos = [];
+    closeDrawer();
+    showAuth();
+    toast('已退出登录');
+  });
+
+  el.pwdSubmit.addEventListener('click', async () => {
+    const currentPassword = el.pwdCurrent.value;
+    const newPassword = el.pwdNew.value;
+    if (newPassword.length < 6) return toast('新密码至少 6 位', 'err');
+    try {
+      const data = await api('/auth/password', { method: 'POST', body: { currentPassword, newPassword } });
+      toast(data.message || '密码已更新', 'ok');
+      el.pwdCurrent.value = '';
+      el.pwdNew.value = '';
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  });
+
+  /* ------------------------------------------------------------------ *
+   * 日期
+   * ------------------------------------------------------------------ */
+  function renderDate() {
+    const { title, sub } = humanDate(state.date);
+    el.pageTitle.textContent = title;
+    el.pageDate.textContent = sub;
+    el.datePillText.textContent = `${state.date} ${WEEKDAYS[weekdayOf(state.date)]}`;
+    el.dateInput.value = state.date;
+    const isToday = state.date === todayStr();
+    el.carryoverBtn.style.visibility = isToday ? 'visible' : 'hidden';
+  }
+
+  el.prevDay.addEventListener('click', () => gotoDate(shiftDate(state.date, -1)));
+  el.nextDay.addEventListener('click', () => gotoDate(shiftDate(state.date, 1)));
+  el.dateInput.addEventListener('change', () => {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(el.dateInput.value)) gotoDate(el.dateInput.value);
+  });
+
+  async function gotoDate(date) {
+    state.date = date;
+    renderDate();
+    await refresh();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 列表渲染
+   * ------------------------------------------------------------------ */
+  function renderList() {
+    el.list.innerHTML = '';
+
+    if (!state.todos.length) {
+      el.emptyState.classList.remove('hidden');
+    } else {
+      el.emptyState.classList.add('hidden');
+      const fragment = document.createDocumentFragment();
+      state.todos.forEach((todo) => fragment.appendChild(renderItem(todo)));
+      el.list.appendChild(fragment);
+    }
+
+    el.remainingCount.textContent = String(state.remaining);
+    el.remainingLabel.textContent = state.remaining === 0
+      ? (state.total ? '全部完成 🎉' : '项待完成')
+      : '项待完成';
+    el.clearDoneBtn.disabled = !state.todos.some((t) => t.done);
+  }
+
+  const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+  const TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>';
+
+  function renderItem(todo) {
+    const li = document.createElement('li');
+    li.className = `todo-item${todo.done ? ' done' : ''}`;
+    li.dataset.id = todo.id;
+
+    const check = document.createElement('button');
+    check.type = 'button';
+    check.className = 'check';
+    check.setAttribute('aria-label', todo.done ? '标记为未完成' : '标记为已完成');
+    check.setAttribute('aria-pressed', String(todo.done));
+    check.innerHTML = CHECK_SVG;
+    check.addEventListener('click', () => toggleTodo(todo));
+
+    const text = document.createElement('div');
+    text.className = 'todo-text';
+    text.textContent = todo.title;
+    text.title = '长按或双击可编辑';
+    bindEdit(li, text, todo);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'todo-del';
+    del.setAttribute('aria-label', '删除任务');
+    del.innerHTML = TRASH_SVG;
+    del.addEventListener('click', () => deleteTodo(todo, li));
+
+    li.append(check, text, del);
+    return li;
+  }
+
+  /** 长按 / 双击进入行内编辑 */
+  function bindEdit(li, node, todo) {
+    let timer = null;
+
+    const start = () => {
+      timer = setTimeout(() => { timer = null; enterEdit(); }, 520);
+    };
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+
+    node.addEventListener('touchstart', start, { passive: true });
+    node.addEventListener('touchend', cancel);
+    node.addEventListener('touchmove', cancel);
+    node.addEventListener('mousedown', start);
+    node.addEventListener('mouseup', cancel);
+    node.addEventListener('mouseleave', cancel);
+    node.addEventListener('dblclick', (e) => { e.preventDefault(); enterEdit(); });
+
+    function enterEdit() {
+      if (node.isContentEditable) return;
+      const original = todo.title;
+      node.contentEditable = 'true';
+      node.focus();
+      document.getSelection()?.selectAllChildren(node);
+
+      const finish = async (save) => {
+        node.contentEditable = 'false';
+        const next = node.textContent.replace(/\s+/g, ' ').trim();
+
+        if (!save || !next || next === original) {
+          node.textContent = original;
+          return;
+        }
+        node.textContent = next;
+        try {
+          const data = await api(`/todos/${encodeURIComponent(todo.id)}`, { method: 'PATCH', body: { title: next } });
+          Object.assign(todo, { title: next });
+          updateCounts(data);
+        } catch (err) {
+          node.textContent = original;
+          toast(err.message, 'err');
+        }
+      };
+
+      const onKey = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); node.blur(); }
+        if (e.key === 'Escape') { node.textContent = original; node.blur(); }
+      };
+      const onBlur = () => {
+        node.removeEventListener('keydown', onKey);
+        node.removeEventListener('blur', onBlur);
+        finish(node.textContent.trim() !== original);
+      };
+
+      node.addEventListener('keydown', onKey);
+      node.addEventListener('blur', onBlur);
+    }
+  }
+
+  function updateCounts(data) {
+    if (typeof data?.remaining === 'number') state.remaining = data.remaining;
+    if (typeof data?.total === 'number') state.total = data.total;
+    el.remainingCount.textContent = String(state.remaining);
+    el.remainingLabel.textContent = state.remaining === 0
+      ? (state.total ? '全部完成 🎉' : '项待完成')
+      : '项待完成';
+    el.clearDoneBtn.disabled = !state.todos.some((t) => t.done);
+  }
+
+  async function refresh() {
+    try {
+      const data = await api(`/todos?date=${encodeURIComponent(state.date)}`);
+      state.todos = data.todos || [];
+      state.remaining = data.remaining ?? state.todos.filter((t) => !t.done).length;
+      state.total = data.total ?? state.todos.length;
+      renderList();
+    } catch (err) {
+      if (err.status === 401) { state.user = null; showAuth(); return; }
+      toast(err.message, 'err');
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 增 / 改 / 删
+   * ------------------------------------------------------------------ */
+  el.addForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (state.busy) return;
+
+    const title = el.addInput.value.replace(/\s+/g, ' ').trim();
+    if (!title) {
+      // 空白任务不添加
+      el.addHint.textContent = '任务内容不能为空';
+      el.addHint.hidden = false;
+      el.addForm.classList.add('shake');
+      setTimeout(() => el.addForm.classList.remove('shake'), 360);
+      el.addInput.focus();
+      return;
+    }
+
+    el.addHint.hidden = true;
+    state.busy = true;
+    const btn = el.addBtn || el.addForm.querySelector('button[type=submit]');
+    if (btn) btn.disabled = true;
+
+    // 乐观插入
+    const tempId = `tmp_${Date.now()}`;
+    const optimistic = { id: tempId, title, done: false, date: state.date, order: -Infinity, createdAt: Date.now() / 1000 };
+    state.todos.unshift(optimistic);
+    state.total += 1;
+    state.remaining += 1;
+    renderList();
+    el.addInput.value = '';
+
+    try {
+      const data = await api('/todos', { method: 'POST', body: { title, date: state.date } });
+      const index = state.todos.findIndex((t) => t.id === tempId);
+      if (index !== -1) state.todos[index] = data.todo;
+      state.todos.sort((a, b) => Number(a.done) - Number(b.done) || a.order - b.order);
+      state.remaining = data.remaining;
+      state.total = data.total;
+      renderList();
+    } catch (err) {
+      state.todos = state.todos.filter((t) => t.id !== tempId);
+      state.total = Math.max(0, state.total - 1);
+      state.remaining = state.todos.filter((t) => !t.done).length;
+      renderList();
+      if (err.status === 401) { showAuth(); return; }
+      toast(err.message, 'err');
+      el.addInput.value = title;
+    } finally {
+      state.busy = false;
+      if (btn) btn.disabled = false;
+      el.addInput.focus({ preventScroll: true });
+    }
+  });
+
+  el.addInput.addEventListener('input', () => { el.addHint.hidden = true; });
+
+  async function toggleTodo(todo) {
+    const next = !todo.done;
+    todo.done = next;
+    // 已完成的沉到底部
+    state.todos.sort((a, b) => Number(a.done) - Number(b.done) || a.order - b.order);
+    state.remaining = state.todos.filter((t) => !t.done).length;
+    renderList();
+
+    try {
+      const data = await api(`/todos/${encodeURIComponent(todo.id)}`, { method: 'PATCH', body: { done: next } });
+      updateCounts(data);
+    } catch (err) {
+      todo.done = !next;
+      state.todos.sort((a, b) => Number(a.done) - Number(b.done) || a.order - b.order);
+      state.remaining = state.todos.filter((t) => !t.done).length;
+      renderList();
+      toast(err.message, 'err');
+    }
+  }
+
+  async function deleteTodo(todo, li) {
+    li.classList.add('removing');
+    const backup = state.todos.slice();
+    state.todos = state.todos.filter((t) => t.id !== todo.id);
+    state.remaining = state.todos.filter((t) => !t.done).length;
+    state.total = state.todos.length;
+
+    setTimeout(renderList, 180);
+    try {
+      const data = await api(`/todos/${encodeURIComponent(todo.id)}?date=${encodeURIComponent(state.date)}`, { method: 'DELETE' });
+      updateCounts(data);
+    } catch (err) {
+      state.todos = backup;
+      state.remaining = backup.filter((t) => !t.done).length;
+      state.total = backup.length;
+      renderList();
+      toast(err.message, 'err');
+    }
+  }
+
+  el.clearDoneBtn.addEventListener('click', () => {
+    if (!state.todos.some((t) => t.done)) return;
+    armedClick(el.clearDoneBtn, '确认清除？', async () => {
+      try {
+        await api('/todos/batch', { method: 'POST', body: { action: 'clear-completed', date: state.date } });
+        await refresh();
+        toast('已清除完成的任务', 'ok');
+      } catch (err) { toast(err.message, 'err'); }
+    });
+  });
+
+  el.carryoverBtn.addEventListener('click', async () => {
+    try {
+      const data = await api('/todos/batch', { method: 'POST', body: { action: 'carry-over', date: state.date } });
+      await refresh();
+      toast(data.moved ? `已顺延 ${data.moved} 项未完成任务` : '没有需要顺延的任务', data.moved ? 'ok' : '');
+    } catch (err) { toast(err.message, 'err'); }
+  });
+
+  /* ------------------------------------------------------------------ *
+   * 主题
+   * ------------------------------------------------------------------ */
+  const THEME_KEY = 'todo-today:theme';
+  function applyTheme(theme) {
+    if (theme === 'light' || theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', theme);
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+    el.themeToggle.textContent = theme === 'dark' ? '☀️' : theme === 'light' ? '🌙' : '🌓';
+  }
+  el.themeToggle.addEventListener('click', () => {
+    const order = ['auto', 'light', 'dark'];
+    const current = localStorage.getItem(THEME_KEY) || 'auto';
+    const next = order[(order.indexOf(current) + 1) % order.length];
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(next === 'auto' ? null : next);
+  });
+  applyTheme(localStorage.getItem(THEME_KEY) || null);
+
+  /* ------------------------------------------------------------------ *
+   * 设置抽屉
+   * ------------------------------------------------------------------ */
+  function openDrawer() {
+    el.drawerMask.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeDrawer() {
+    el.drawerMask.classList.add('hidden');
+    document.body.style.overflow = '';
+  }
+  el.userMenu.addEventListener('click', openDrawer);
+  el.drawerClose.addEventListener('click', closeDrawer);
+  el.drawerMask.addEventListener('click', (e) => { if (e.target === el.drawerMask) closeDrawer(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  el.demoBannerClose.addEventListener('click', () => el.demoBanner.classList.add('hidden'));
+
+  /* ------------------------------ 云备份 ------------------------------ */
+  function syncProviderPanels() {
+    const provider = el.backupProvider.value;
+    el.backupPanels.forEach((panel) => {
+      panel.hidden = panel.dataset.provider !== provider;
+    });
+    const on = el.backupEnabled.checked && provider !== 'none';
+    el.backupEnabled.disabled = provider === 'none';
+    el.backupAuto.disabled = !on;
+    [el.backupTest, el.backupRun, el.backupRestore].forEach((b) => { b.disabled = provider === 'none'; });
+    if (!on) el.backupAuto.checked = false;
+  }
+
+  el.backupProvider.addEventListener('change', syncProviderPanels);
+  el.backupEnabled.addEventListener('change', syncProviderPanels);
+
+  async function loadBackupConfig() {
+    try {
+      const data = await api('/backup/config');
+      fillBackupForm(data.config || {});
+      if (data.lastBackup) {
+        el.lastBackupLine.textContent = `上次备份：${new Date(data.lastBackup * 1000).toLocaleString()}`;
+      } else {
+        el.lastBackupLine.textContent = '尚未备份过。';
+      }
+    } catch (err) {
+      setStatus(el.backupStatus, `读取备份配置失败：${err.message}`, 'err');
+    }
+  }
+
+  function fillBackupForm(config) {
+    el.backupProvider.value = config.provider || 'none';
+    el.backupEnabled.checked = !!config.enabled;
+    el.backupAuto.checked = !!config.auto;
+
+    el.r2Key.value = config.r2?.key || '';
+    if (config.hasR2Binding === false) {
+      el.r2Key.placeholder = '未检测到 R2 绑定 BACKUPS';
+    }
+
+    const s3 = config.s3 || {};
+    el.s3Endpoint.value = s3.endpoint || '';
+    el.s3Region.value = s3.region || 'auto';
+    el.s3Bucket.value = s3.bucket || '';
+    el.s3Akid.value = s3.accessKeyId || '';
+    el.s3Secret.value = '';
+    el.s3Secret.placeholder = s3.hasSecretKey
+      ? (s3.secretFromEnv ? '已在环境变量中配置（留空即使用）' : '已保存，留空表示不修改')
+      : '留空表示不修改';
+    el.s3Prefix.value = s3.prefix || '';
+    el.s3File.value = config.file && config.provider === 's3' ? config.file : (config.file || '');
+    el.s3PathStyle.checked = !!s3.pathStyle;
+
+    const dav = config.webdav || {};
+    el.davUrl.value = dav.url || '';
+    el.davUser.value = dav.username || '';
+    el.davPass.value = '';
+    el.davPass.placeholder = dav.hasPassword
+      ? (dav.passwordFromEnv ? '已在环境变量中配置（留空即使用）' : '已保存，留空表示不修改')
+      : '留空表示不修改';
+    el.davFile.value = dav.file || '';
+
+    syncProviderPanels();
+  }
+
+  function collectBackupForm() {
+    const provider = el.backupProvider.value;
+    return {
+      provider,
+      enabled: el.backupEnabled.checked && provider !== 'none',
+      auto: el.backupAuto.checked && el.backupEnabled.checked && provider !== 'none',
+      file: provider === 'webdav'
+        ? (el.davFile.value.trim() || 'todo-today.backup.json')
+        : (el.s3File.value.trim() || 'todo-today.backup.json'),
+      r2: { key: el.r2Key.value.trim() },
+      s3: {
+        endpoint: el.s3Endpoint.value.trim(),
+        region: el.s3Region.value.trim() || 'auto',
+        bucket: el.s3Bucket.value.trim(),
+        accessKeyId: el.s3Akid.value.trim(),
+        secretAccessKey: el.s3Secret.value.trim(),
+        prefix: el.s3Prefix.value.trim(),
+        pathStyle: el.s3PathStyle.checked,
+      },
+      webdav: {
+        url: el.davUrl.value.trim(),
+        username: el.davUser.value.trim(),
+        password: el.davPass.value.trim(),
+        file: el.davFile.value.trim(),
+      },
+    };
+  }
+
+  el.backupSave.addEventListener('click', async () => {
+    setStatus(el.backupStatus, '保存中…', 'busy');
+    try {
+      const data = await api('/backup/config', { method: 'PUT', body: collectBackupForm() });
+      fillBackupForm(data.config || {});
+      setStatus(el.backupStatus, '配置已保存', 'ok');
+      toast('备份配置已保存', 'ok');
+    } catch (err) {
+      setStatus(el.backupStatus, `保存失败：${err.message}`, 'err');
+    }
+  });
+
+  el.backupTest.addEventListener('click', async () => {
+    setStatus(el.backupStatus, '正在测试连接…', 'busy');
+    try {
+      const data = await api('/backup/test', { method: 'POST', body: collectBackupForm() });
+      setStatus(el.backupStatus, data.message || '连接正常', 'ok');
+    } catch (err) {
+      setStatus(el.backupStatus, `连接失败：${err.message}`, 'err');
+    }
+  });
+
+  el.backupRun.addEventListener('click', async () => {
+    setStatus(el.backupStatus, '正在备份…', 'busy');
+    try {
+      const data = await api('/backup/run', { method: 'POST' });
+      const r = data.result || {};
+      setStatus(el.backupStatus, `备份成功：共 ${r.total ?? '-'} 条任务，${formatBytes(r.size)}`, 'ok');
+      el.lastBackupLine.textContent = `上次备份：${new Date().toLocaleString()}`;
+      toast('已备份到云端', 'ok');
+    } catch (err) {
+      setStatus(el.backupStatus, `备份失败：${err.message}`, 'err');
+    }
+  });
+
+  el.backupRestore.addEventListener('click', () => {
+    armedClick(el.backupRestore, '确认覆盖？', async () => {
+      setStatus(el.backupStatus, '正在从云端恢复…', 'busy');
+      try {
+        const data = await api('/backup/restore', { method: 'POST', body: { mode: 'replace' } });
+        setStatus(el.backupStatus, `${data.message}（新增 ${data.result?.inserted ?? 0} 条）`, 'ok');
+        await refresh();
+      } catch (err) {
+        setStatus(el.backupStatus, `恢复失败：${err.message}`, 'err');
+      }
+    });
+  });
+
+  function formatBytes(n) {
+    const num = Number(n) || 0;
+    if (num < 1024) return `${num} B`;
+    if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+    return `${(num / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  /* ------------------------------ 导入导出 ------------------------------ */
+  el.exportBtn.addEventListener('click', async () => {
+    try {
+      if (state.demo) {
+        const db = demoRead();
+        downloadJson({ app: 'todo-today', version: 1, exportedAt: new Date().toISOString(), todos: db.todos });
+        return;
+      }
+      const res = await fetch(`${API_BASE}/export`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(`导出失败 (${res.status})`);
+      const blob = await res.blob();
+      downloadBlob(blob, `todo-today-${todayStr()}.json`);
+      toast('已导出 JSON', 'ok');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  });
+
+  el.importBtn.addEventListener('click', () => el.importFile.click());
+
+  el.importFile.addEventListener('change', async () => {
+    const file = el.importFile.files?.[0];
+    el.importFile.value = '';
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      if (!Array.isArray(payload?.todos)) throw new Error('文件格式不正确：缺少 todos 数组');
+
+      if (state.demo) {
+        const db = demoRead();
+        db.todos = payload.todos.map((t, i) => ({
+          id: demoId(), title: String(t.title || '').trim(), done: !!t.done,
+          date: t.date || todayStr(), order: i, createdAt: Math.floor(Date.now() / 1000),
+        })).filter((t) => t.title);
+        demoWrite(db);
+        await refresh();
+        toast(`导入完成：${db.todos.length} 条`, 'ok');
+        return;
+      }
+
+      const data = await api('/import', { method: 'POST', body: { payload, mode: 'replace' } });
+      await refresh();
+      toast(data.message || '导入完成', 'ok');
+    } catch (err) {
+      toast(`导入失败：${err.message}`, 'err');
+    }
+  });
+
+  function downloadJson(obj) {
+    downloadBlob(new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' }), `todo-today-${todayStr()}.json`);
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 启动
+   * ------------------------------------------------------------------ */
+  el.aboutVersion.textContent = `前端 v${APP_VERSION}`;
+
+  // 快捷键：/ 聚焦输入框
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '/' && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')
+        && !document.activeElement?.isContentEditable) {
+      e.preventDefault();
+      el.addInput.focus();
+    }
+  });
+
+  (async function boot() {
+    renderDate();
+
+    if (FORCE_DEMO) {
+      state.demo = true;
+      seedDemoData();
+      el.demoBanner.classList.remove('hidden');
+      el.aboutVersion.textContent = `前端 v${APP_VERSION} · 演示模式`;
+      state.user = demoRead().user;
+      await showMain();
+      return;
+    }
+
+    try {
+      const data = await api('/auth/me');
+      state.user = data.user;
+      if (state.user) await showMain();
+      else showAuth();
+    } catch {
+      showAuth();
+    }
+  })();
+})();

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="theme-color" content="#5b5bd6" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#141428" media="(prefers-color-scheme: dark)" />
+<meta name="description" content="今日待办 · 极简的每日清单，云端同步，支持云备份" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="今日待办" />
+<title>今日待办</title>
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="icon" href="./icon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="./icon.svg" />
+<link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+
+<!-- ============================ 加载中 ============================ -->
+<div id="boot" class="boot">
+  <div class="spinner" aria-hidden="true"></div>
+</div>
+
+<!-- ============================ 登录 / 注册 ============================ -->
+<section id="auth-view" class="view auth-view hidden">
+  <div class="auth-card">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3L22 4" />
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+      </div>
+      <h1>今日待办</h1>
+      <p class="brand-sub">每天只关心今天的清单</p>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-mode="login" role="tab">登录</button>
+      <button class="tab" data-mode="register" role="tab">注册</button>
+    </div>
+
+    <form id="auth-form" autocomplete="on" novalidate>
+      <label class="field">
+        <span>用户名</span>
+        <input id="auth-username" type="text" name="username" autocomplete="username"
+               placeholder="2-20 位，中英文/数字/_ . -" required maxlength="20" />
+      </label>
+
+      <label class="field">
+        <span>密码</span>
+        <div class="input-with-action">
+          <input id="auth-password" type="password" name="password"
+                 autocomplete="current-password" placeholder="至少 6 位" required minlength="6" maxlength="128" />
+          <button type="button" id="toggle-password" class="ghost-icon" aria-label="显示密码">👁</button>
+        </div>
+      </label>
+
+      <p id="auth-error" class="form-error" role="alert" hidden></p>
+
+      <button type="submit" id="auth-submit" class="btn primary block">
+        <span id="auth-submit-label">登录</span>
+      </button>
+    </form>
+
+    <p class="auth-foot">
+      数据存储在 Cloudflare D1，可自由配置 R2 / S3 / WebDAV 云备份。
+    </p>
+  </div>
+</section>
+
+<!-- ============================ 主界面 ============================ -->
+<section id="main-view" class="view main-view hidden">
+
+  <header class="topbar">
+    <div class="topbar-main">
+      <h1 class="topbar-title" id="page-title">今天</h1>
+      <p class="topbar-sub" id="page-date"></p>
+    </div>
+    <div class="topbar-actions">
+      <button id="theme-toggle" class="icon-btn" aria-label="切换主题" title="切换主题">🌓</button>
+      <button id="user-menu" class="user-chip" aria-label="账号">
+        <span id="user-initial">U</span>
+      </button>
+    </div>
+  </header>
+
+  <div id="demo-banner" class="demo-banner hidden">
+    <strong>演示模式</strong>
+    <span>当前为演示模式，数据仅保存在本机浏览器。</span>
+    <button type="button" id="demo-banner-close" class="icon-btn small" aria-label="关闭">✕</button>
+  </div>
+
+  <!-- 日期切换 -->
+  <nav class="datebar">
+    <button class="icon-btn" id="prev-day" aria-label="前一天">‹</button>
+    <label class="date-pill" id="date-pill">
+      <span id="date-pill-text">今天</span>
+      <input type="date" id="date-input" aria-label="选择日期" />
+    </label>
+    <button class="icon-btn" id="next-day" aria-label="后一天">›</button>
+  </nav>
+
+  <!-- 新增任务 -->
+  <form id="add-form" class="add-form" autocomplete="off">
+    <input id="add-input" type="text" placeholder="添加一件今天要做的事…"
+           maxlength="500" enterkeyhint="done" aria-label="新增任务" />
+    <button type="submit" id="add-btn" class="btn primary" aria-label="添加">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">
+        <path d="M12 5v14M5 12h14" />
+      </svg>
+    </button>
+  </form>
+  <p id="add-hint" class="add-hint" role="alert" hidden></p>
+
+  <!-- 列表 -->
+  <main class="list-wrap">
+    <ul id="todo-list" class="todo-list"></ul>
+
+    <div id="empty-state" class="empty-state hidden">
+      <div class="empty-art" aria-hidden="true">🌤</div>
+      <p class="empty-title">今天还没有安排</p>
+      <p class="empty-sub">在上面输入框敲下第一件事吧</p>
+    </div>
+  </main>
+
+  <!-- 底部统计 -->
+  <footer class="footer">
+    <div class="footer-stat">
+      <span id="remaining-count">0</span>
+      <span id="remaining-label">项待完成</span>
+    </div>
+    <div class="footer-actions">
+      <button id="carryover-btn" class="btn subtle small" title="把以往未完成的任务挪到今天">顺延未完成</button>
+      <button id="clear-done-btn" class="btn subtle small" title="删除所有已完成任务">清除已完成</button>
+    </div>
+  </footer>
+</section>
+
+<!-- ============================ 设置抽屉 ============================ -->
+<div id="drawer-mask" class="drawer-mask hidden">
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-label="设置">
+    <header class="drawer-head">
+      <h2>设置</h2>
+      <button id="drawer-close" class="icon-btn" aria-label="关闭">✕</button>
+    </header>
+
+    <div class="drawer-body">
+
+      <section class="card account-card">
+        <div class="row-between">
+          <div>
+            <p class="card-label">当前账号</p>
+            <p class="account-name" id="account-name">-</p>
+          </div>
+          <button id="logout-btn" class="btn subtle small">退出登录</button>
+        </div>
+        <div class="divider"></div>
+        <details class="collapse">
+          <summary>修改密码</summary>
+          <div class="collapse-body">
+            <label class="field"><span>当前密码</span>
+              <input id="pwd-current" type="password" autocomplete="current-password" /></label>
+            <label class="field"><span>新密码</span>
+              <input id="pwd-new" type="password" autocomplete="new-password" placeholder="至少 6 位" /></label>
+            <button id="pwd-submit" class="btn subtle block small">更新密码</button>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <p class="card-label">云备份</p>
+        <p class="card-desc">
+          把清单自动或手动同步到云端存储。支持 Cloudflare R2、任意 S3 兼容对象存储，
+          以及 Nextcloud / 坚果云 / 群晖等 WebDAV 服务。
+        </p>
+
+        <label class="field">
+          <span>备份方式</span>
+          <select id="backup-provider">
+            <option value="none">不启用</option>
+            <option value="r2">Cloudflare R2（原生绑定）</option>
+            <option value="s3">S3 兼容对象存储</option>
+            <option value="webdav">WebDAV</option>
+          </select>
+        </label>
+
+        <div class="switch-row">
+          <label class="switch">
+            <input type="checkbox" id="backup-enabled" />
+            <span class="slider"></span>
+            <span class="switch-text">启用云备份</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="backup-auto" />
+            <span class="slider"></span>
+            <span class="switch-text">变更后自动备份</span>
+          </label>
+        </div>
+
+        <!-- R2 -->
+        <div class="provider-panel" data-provider="r2" hidden>
+          <label class="field"><span>对象键名</span>
+            <input id="r2-key" type="text" placeholder="todo-today.backup.json" /></label>
+          <p class="hint">需要在 wrangler.jsonc 中启用 <code>r2_buckets</code> 绑定 <code>BACKUPS</code>，无需任何密钥。</p>
+        </div>
+
+        <!-- S3 -->
+        <div class="provider-panel" data-provider="s3" hidden>
+          <label class="field"><span>Endpoint 服务地址</span>
+            <input id="s3-endpoint" type="url" placeholder="https://<accountid>.r2.cloudflarestorage.com" /></label>
+          <div class="grid-2">
+            <label class="field"><span>Region</span>
+              <input id="s3-region" type="text" placeholder="auto / us-east-1" /></label>
+            <label class="field"><span>Bucket</span>
+              <input id="s3-bucket" type="text" placeholder="todo-backups" /></label>
+          </div>
+          <label class="field"><span>Access Key ID</span>
+            <input id="s3-akid" type="text" placeholder="AKIA..." autocomplete="off" /></label>
+          <label class="field"><span>Secret Access Key</span>
+            <input id="s3-secret" type="password" placeholder="留空表示不修改" autocomplete="new-password" /></label>
+          <div class="grid-2">
+            <label class="field"><span>路径前缀</span>
+              <input id="s3-prefix" type="text" placeholder="todo/" /></label>
+            <label class="field"><span>文件名</span>
+              <input id="s3-file" type="text" placeholder="todo-today.backup.json" /></label>
+          </div>
+          <label class="switch compact">
+            <input type="checkbox" id="s3-pathstyle" />
+            <span class="slider"></span>
+            <span class="switch-text">使用 Path-Style 寻址（MinIO 等自建服务常用）</span>
+          </label>
+        </div>
+
+        <!-- WebDAV -->
+        <div class="provider-panel" data-provider="webdav" hidden>
+          <label class="field"><span>WebDAV 目录地址</span>
+            <input id="dav-url" type="url" placeholder="https://dav.jianguoyun.com/dav/我的坚果云/todo" /></label>
+          <div class="grid-2">
+            <label class="field"><span>用户名</span>
+              <input id="dav-user" type="text" autocomplete="off" /></label>
+            <label class="field"><span>密码 / 应用密码</span>
+              <input id="dav-pass" type="password" placeholder="留空表示不修改" autocomplete="new-password" /></label>
+          </div>
+          <label class="field"><span>文件名</span>
+            <input id="dav-file" type="text" placeholder="todo-today.backup.json" /></label>
+        </div>
+
+        <div class="btn-row">
+          <button id="backup-test" class="btn subtle small">测试连接</button>
+          <button id="backup-save" class="btn subtle small">保存配置</button>
+        </div>
+        <div class="btn-row">
+          <button id="backup-run" class="btn primary small">立即备份</button>
+          <button id="backup-restore" class="btn subtle small">从云端恢复</button>
+        </div>
+        <p id="backup-status" class="status-line" hidden></p>
+        <p class="hint" id="last-backup-line"></p>
+        <p class="hint">密钥也可以放在 Worker 环境变量里：<code>BACKUP_S3_SECRET_KEY</code>、<code>BACKUP_WEBDAV_PASSWORD</code>。</p>
+      </section>
+
+      <section class="card">
+        <p class="card-label">本地数据</p>
+        <p class="card-desc">导出为 JSON 文件存档，或从文件恢复。</p>
+        <div class="btn-row">
+          <button id="export-btn" class="btn subtle small">导出 JSON</button>
+          <button id="import-btn" class="btn subtle small">导入 JSON</button>
+        </div>
+        <input type="file" id="import-file" accept="application/json,.json" hidden />
+      </section>
+
+      <section class="card about-card">
+        <p class="card-label">关于</p>
+        <p class="card-desc">
+          Cloudflare Workers 无服务器部署 · 数据存于 D1 · 口令以 PBKDF2-SHA256 派生存储。
+        </p>
+        <p class="hint" id="about-version"></p>
+      </section>
+    </div>
+  </aside>
+</div>
+
+<div id="toast-host" class="toast-host" aria-live="polite"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>
