@@ -519,6 +519,15 @@ body.side-open .sidebar {
 }
 .tl-year:hover { background: var(--surface-2); }
 .tl-year small { color: var(--text-faint); font-weight: 500; }
+/* 日历标题可点击 → 查看整月 */
+#cal-title {
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 1px 4px;
+  margin: -1px -4px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+#cal-title:hover { background: var(--surface-2); color: var(--brand); }
 .tl-months { display: flex; flex-wrap: wrap; gap: 5px; padding: 2px 4px 10px 10px; }
 .tl-month {
   border: 1px solid var(--border);

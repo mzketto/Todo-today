@@ -8,6 +8,7 @@ import { HttpError, nowSeconds } from './auth.js';
 
 const MAX_TITLE = 500;
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+export const MONTH_RE = /^\d{4}-(?:0[1-9]|1[0-2])$/;
 /** 标题里的 #标签（1-24 个非空白字符，不含 #） */
 const TAG_RE = /#([^\s#]{1,24})/g;
 
@@ -27,6 +28,17 @@ export function normalizeDate(raw, fallback = null) {
   if (!DATE_RE.test(value)) throw new HttpError('日期格式不正确，应为 YYYY-MM-DD');
   const d = new Date(`${value}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) throw new HttpError('日期无效');
+  return value;
+}
+
+/** 校验月份参数（YYYY-MM），供整月视图使用 */
+export function normalizeMonth(raw, fallback = null) {
+  const value = String(raw || '').trim();
+  if (!value) {
+    if (fallback) return fallback;
+    throw new HttpError('月份格式不正确，应为 YYYY-MM');
+  }
+  if (!MONTH_RE.test(value)) throw new HttpError('月份格式不正确，应为 YYYY-MM');
   return value;
 }
 
@@ -62,6 +74,35 @@ export async function listAllTodos(env, userId) {
     .bind(userId)
     .all();
   return (results || []).map(toDto);
+}
+
+/**
+ * 取回某个整月的待办（按日期倒序、组内未完成在前），供「月视图」使用。
+ * 上限 500 条，个人应用足够；超出时提示用户缩小范围。
+ */
+export async function listByMonth(env, userId, rawMonth) {
+  const month = normalizeMonth(rawMonth);
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM todos
+      WHERE user_id = ? AND todo_date >= ? AND todo_date < ?
+      ORDER BY todo_date DESC, done ASC, sort_order ASC, created_at ASC
+      LIMIT 501`,
+  )
+    .bind(userId, `${month}-01`, nextMonthStart(month))
+    .all();
+
+  const rows = results || [];
+  if (rows.length > 500) {
+    throw new HttpError('该月任务超过 500 条，请按日期缩小范围查看', 413);
+  }
+  return { month, todos: rows.map(toDto) };
+}
+
+/** 月份 +1 的起点日期（如 2025-10 → 2025-11-01），用于范围查询 */
+function nextMonthStart(month) {
+  const [y, m] = month.split('-').map(Number);
+  const date = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+  return date;
 }
 
 export async function countByDate(env, userId, date) {
@@ -184,6 +225,17 @@ export async function clearCompleted(env, userId, date) {
     'DELETE FROM todos WHERE user_id = ? AND todo_date = ? AND done = 1',
   )
     .bind(userId, day)
+    .run();
+  return { removed: res?.meta?.changes ?? 0 };
+}
+
+/** 清除整个月份的已完成任务（月视图用） */
+export async function clearCompletedMonth(env, userId, rawMonth) {
+  const month = normalizeMonth(rawMonth);
+  const res = await env.DB.prepare(
+    'DELETE FROM todos WHERE user_id = ? AND todo_date >= ? AND todo_date < ? AND done = 1',
+  )
+    .bind(userId, `${month}-01`, nextMonthStart(month))
     .run();
   return { removed: res?.meta?.changes ?? 0 };
 }

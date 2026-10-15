@@ -135,6 +135,9 @@
     todos: [],
     remaining: 0,
     total: 0,
+    // 月视图：非空时卡片流展示整月任务
+    month: null,
+    monthTodos: [],
     authMode: 'login',
     demo: false,
     apiConfirmed: false,
@@ -163,6 +166,13 @@
     const dt = new Date(y, m - 1, d);
     dt.setDate(dt.getDate() + delta);
     return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
+  }
+
+  /** 月份平移：'2025-10' + (-1) → '2025-09' */
+  function shiftMonthStr(monthStr, delta) {
+    const [y, m] = monthStr.split('-').map(Number);
+    const zero = y * 12 + (m - 1) + delta;
+    return `${Math.floor(zero / 12)}-${pad((zero % 12) + 1)}`;
   }
 
   const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -310,6 +320,16 @@
     if (seg[0] === 'todos') {
       const date = params.get('date') || state.date;
 
+      // 整月视图
+      const month = params.get('month');
+      if (!seg[1] && method === 'GET' && month) {
+        if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(month)) throw new ApiError('月份格式不正确，应为 YYYY-MM');
+        const list = db.todos
+          .filter((t) => t.date.startsWith(`${month}-`))
+          .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : Number(a.done) - Number(b.done) || a.order - b.order));
+        return { ok: true, month, todos: list, remaining: list.filter((t) => !t.done).length, total: list.length };
+      }
+
       if (!seg[1] && method === 'GET') {
         return { ok: true, date, todos: demoList(db.todos, date), ...demoCount(db.todos, date) };
       }
@@ -332,7 +352,12 @@
         const day = body?.date || date;
         if (body?.action === 'clear-completed') {
           const before = db.todos.length;
-          db.todos = db.todos.filter((t) => !(t.date === day && t.done));
+          if (body?.month) {
+            if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(body.month)) throw new ApiError('月份格式不正确，应为 YYYY-MM');
+            db.todos = db.todos.filter((t) => !(t.date.startsWith(`${body.month}-`) && t.done));
+          } else {
+            db.todos = db.todos.filter((t) => !(t.date === day && t.done));
+          }
           demoWrite(db);
           return { ok: true, removed: before - db.todos.length, ...demoCount(db.todos, day) };
         }
@@ -523,6 +548,9 @@
     // ?q=xxx 直接进入搜索状态（演示/截图用）
     const q = URL_PARAMS.get('q');
     if (q) startSearch(q);
+    // ?month=YYYY-MM 直接进入整月视图（演示/截图用）
+    const mv = URL_PARAMS.get('month');
+    if (mv && /^\d{4}-\d{2}$/.test(mv)) openMonth(mv);
   }
 
   /* ------------------------------------------------------------------ *
@@ -621,8 +649,14 @@
     }
   }
 
-  el.prevDay.addEventListener('click', () => gotoDate(shiftDate(state.date, -1)));
-  el.nextDay.addEventListener('click', () => gotoDate(shiftDate(state.date, 1)));
+  el.prevDay.addEventListener('click', () => {
+    if (state.month) { openMonth(shiftMonthStr(state.month, -1), { closeSide: false }); return; }
+    gotoDate(shiftDate(state.date, -1));
+  });
+  el.nextDay.addEventListener('click', () => {
+    if (state.month) { openMonth(shiftMonthStr(state.month, 1), { closeSide: false }); return; }
+    gotoDate(shiftDate(state.date, 1));
+  });
   el.dateInput.addEventListener('change', () => {
     if (/^\d{4}-\d{2}-\d{2}$/.test(el.dateInput.value)) gotoDate(el.dateInput.value);
   });
@@ -632,10 +666,72 @@
 
   async function gotoDate(date) {
     if (state.search.active || el.searchInput.value) exitSearch();
+    state.month = null;
     state.date = date;
     renderDate();
     closeSidebar();
     await refresh();
+  }
+
+  /* ------------------------------ 月视图 ------------------------------ */
+
+  /** 进入整月视图：展示该月所有任务，按日期倒序分组 */
+  async function openMonth(month, { closeSide = true } = {}) {
+    if (state.search.active || el.searchInput.value) exitSearch();
+    state.month = month;
+
+    // 同步日历与「当前日期」上下文（composer 归属日期落在该月内）
+    const [y, m] = month.split('-').map(Number);
+    state.cal = { y, m: m - 1 };
+    if (!state.date.startsWith(`${month}-`)) {
+      state.date = state.stats.find((s) => s.date.startsWith(`${month}-`))?.date || `${month}-01`;
+    }
+
+    renderMonthHeader();
+    renderCalendar();
+    closeSide && closeSidebar();
+    await refreshMonth();
+  }
+
+  function exitMonth() {
+    state.month = null;
+    renderDate();
+    renderList();
+    el.addInput.focus({ preventScroll: true });
+  }
+
+  /** 月视图的顶部标题与日期条 */
+  function renderMonthHeader() {
+    const [y, m] = state.month.split('-').map(Number);
+    el.pageTitle.textContent = `${y} 年 ${m} 月`;
+    el.pageDate.textContent = '整月视图 · 按日期倒序';
+    el.datePillText.textContent = `${state.month} 全月`;
+    // composer 归属日期保持在当月，新添加的任务会落进当前查看的月份
+    el.composerDateText.textContent = `${state.date.slice(5)} ${WEEKDAYS[weekdayOf(state.date)]}`;
+    el.composerDateInput.value = state.date;
+    el.carryoverBtn.style.visibility = 'hidden';
+  }
+
+  async function refreshMonth() {
+    const month = state.month;
+    if (!month) return;
+    try {
+      const data = await api(`/todos?month=${encodeURIComponent(month)}`);
+      if (state.month !== month) return;   // 用户已切走
+      state.monthTodos = data.todos || [];
+      const undone = state.monthTodos.filter((t) => !t.done).length;
+      state.remaining = undone;
+      state.total = state.monthTodos.length;
+      el.remainingCount.textContent = String(undone);
+      el.remainingLabel.textContent = undone === 0
+        ? (state.monthTodos.length ? '本月全部完成 🎉' : '项待完成')
+        : '项待完成';
+      el.clearDoneBtn.disabled = !state.monthTodos.some((t) => t.done);
+      renderList();
+    } catch (err) {
+      if (err.status === 401) { state.user = null; showAuth(); return; }
+      toast(err.message, 'err');
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -649,7 +745,18 @@
       el.searchBannerText.textContent = state.search.loading
         ? `正在搜索「${state.search.q}」…`
         : `搜索「${state.search.q}」：${state.search.results.length} 条结果`;
+      el.searchExit.textContent = '退出搜索';
       renderSearchResults();
+      return;
+    }
+
+    if (state.month) {
+      el.searchBanner.classList.remove('hidden');
+      const [y, m] = state.month.split('-').map(Number);
+      const undone = state.monthTodos.filter((t) => !t.done).length;
+      el.searchBannerText.textContent = `${y} 年 ${m} 月 · 共 ${state.monthTodos.length} 条 · ${undone} 项未完成`;
+      el.searchExit.textContent = '返回单日';
+      renderMonthResults();
       return;
     }
 
@@ -685,15 +792,31 @@
       return;
     }
     el.emptyState.classList.add('hidden');
+    renderGroupedByDate(state.search.results);
+  }
 
+  /** 月视图：整月任务按日期分组（日期倒序）展示 */
+  function renderMonthResults() {
+    if (!state.monthTodos.length) {
+      el.emptyState.classList.remove('hidden');
+      el.emptyTitle.textContent = '这个月还没有任务';
+      el.emptySub.textContent = '在日历或时间线选一天，敲下第一件事吧';
+      return;
+    }
+    el.emptyState.classList.add('hidden');
+    renderGroupedByDate(state.monthTodos);
+  }
+
+  /** 通用：按日期分组渲染卡片流，组头显示「x 月 x 日 · 剩余 / 共 N」 */
+  function renderGroupedByDate(list) {
     const groups = new Map();
-    for (const todo of state.search.results) {
+    for (const todo of list) {
       if (!groups.has(todo.date)) groups.set(todo.date, []);
       groups.get(todo.date).push(todo);
     }
 
     const fragment = document.createDocumentFragment();
-    for (const [date, list] of groups) {
+    for (const [date, items] of groups) {
       const head = document.createElement('div');
       head.className = 'feed-date-head';
       const { title } = humanDate(date);
@@ -702,11 +825,11 @@
         Object.assign(document.createElement('small'), { textContent: date }),
         Object.assign(document.createElement('span'), {
           className: 'feed-date-count',
-          textContent: `${list.filter((t) => !t.done).length} 项未完成 / 共 ${list.length}`,
+          textContent: `${items.filter((t) => !t.done).length} 项未完成 / 共 ${items.length}`,
         }),
       );
       fragment.appendChild(head);
-      list.forEach((todo) => fragment.appendChild(renderItem(todo, { showDate: false })));
+      items.forEach((todo) => fragment.appendChild(renderItem(todo, { showDate: false })));
     }
     el.feed.appendChild(fragment);
   }
@@ -928,6 +1051,7 @@
   function renderCalendar() {
     const { y, m } = state.cal;
     el.calTitle.textContent = `${y} 年 ${m + 1} 月`;
+    el.calTitle.title = `查看 ${y} 年 ${m + 1} 月全部任务`;
     el.calendar.innerHTML = '';
 
     const byDate = new Map(state.stats.map((s) => [s.date, s]));
@@ -962,6 +1086,8 @@
 
   el.calPrev.addEventListener('click', () => shiftMonth(-1));
   el.calNext.addEventListener('click', () => shiftMonth(1));
+  // 点击日历标题 → 查看该月全部任务的整月视图
+  el.calTitle.addEventListener('click', () => openMonth(`${state.cal.y}-${pad(state.cal.m + 1)}`));
   function shiftMonth(delta) {
     const d = new Date(state.cal.y, state.cal.m + delta, 1);
     state.cal = { y: d.getFullYear(), m: d.getMonth() };
@@ -1002,13 +1128,16 @@
     }
 
     for (const [y, year] of years) {
+      const latestMonth = Array.from(year.months.keys())[0];
       const yearRow = document.createElement('div');
       yearRow.className = 'tl-year';
+      yearRow.title = `查看 ${y} 年 ${latestMonth} 月及更早的任务`;
       yearRow.append(
         Object.assign(document.createElement('span'), { textContent: String(y) }),
         Object.assign(document.createElement('small'), { textContent: `${year.count} 条` }),
       );
-      yearRow.addEventListener('click', () => gotoDate(year.latest));
+      // 点击年份 → 打开该年最近有任务的月份的整月视图
+      yearRow.addEventListener('click', () => openMonth(`${y}-${pad(latestMonth)}`));
       el.timelineList.appendChild(yearRow);
 
       const months = document.createElement('div');
@@ -1017,11 +1146,13 @@
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'tl-month';
+        btn.title = `查看 ${y} 年 ${m} 月全部 ${info.count} 条任务`;
         btn.append(
           document.createTextNode(`${m} 月`),
           Object.assign(document.createElement('b'), { textContent: String(info.count) }),
         );
-        btn.addEventListener('click', () => gotoDate(info.latest));
+        // 点击月份 → 整月视图（该月所有任务按日期分组展示）
+        btn.addEventListener('click', () => openMonth(`${y}-${pad(m)}`));
         months.appendChild(btn);
       }
       el.timelineList.appendChild(months);
@@ -1059,7 +1190,11 @@
   });
 
   el.searchClear.addEventListener('click', () => { exitSearch(); el.addInput.focus({ preventScroll: true }); });
-  el.searchExit.addEventListener('click', () => { exitSearch(); el.addInput.focus({ preventScroll: true }); });
+  el.searchExit.addEventListener('click', () => {
+    if (state.month) { exitMonth(); return; }
+    exitSearch();
+    el.addInput.focus({ preventScroll: true });
+  });
 
   async function runSearch(q) {
     state.search = { q, active: true, loading: true, results: [] };
@@ -1121,6 +1256,25 @@
     const btn = el.addBtn || el.addForm.querySelector('button[type=submit]');
     if (btn) btn.disabled = true;
 
+    // 月视图：不做日视图的乐观插入，成功后刷新整月数据
+    if (state.month) {
+      el.addInput.value = '';
+      try {
+        await api('/todos', { method: 'POST', body: { title, date: state.date } });
+        await refreshMonth();
+        scheduleSidebarRefresh();
+      } catch (err) {
+        if (err.status === 401) { showAuth(); return; }
+        toast(err.message, 'err');
+        el.addInput.value = title;
+      } finally {
+        state.busy = false;
+        if (btn) btn.disabled = false;
+        el.addInput.focus({ preventScroll: true });
+      }
+      return;
+    }
+
     // 乐观插入
     const tempId = `tmp_${Date.now()}`;
     const optimistic = { id: tempId, title, done: false, date: state.date, order: -Infinity, createdAt: Date.now() / 1000 };
@@ -1166,46 +1320,70 @@
 
     try {
       const data = await api(`/todos/${encodeURIComponent(todo.id)}`, { method: 'PATCH', body: { done: next } });
-      updateCounts(data);
+      if (state.month) { await refreshMonth(); }
+      else { updateCounts(data); }
       scheduleSidebarRefresh();
     } catch (err) {
       todo.done = !next;
-      state.todos.sort((a, b) => Number(a.done) - Number(b.done) || a.order - b.order);
-      state.remaining = state.todos.filter((t) => !t.done).length;
-      renderList();
+      if (state.month) { renderList(); } else {
+        state.todos.sort((a, b) => Number(a.done) - Number(b.done) || a.order - b.order);
+        state.remaining = state.todos.filter((t) => !t.done).length;
+        renderList();
+      }
       toast(err.message, 'err');
     }
   }
 
   async function deleteTodo(todo, li) {
     li.classList.add('removing');
-    const backup = state.todos.slice();
-    state.todos = state.todos.filter((t) => t.id !== todo.id);
-    state.remaining = state.todos.filter((t) => !t.done).length;
-    state.total = state.todos.length;
+    const backup = state.month ? state.monthTodos.slice() : state.todos.slice();
+    if (state.month) {
+      state.monthTodos = state.monthTodos.filter((t) => t.id !== todo.id);
+    } else {
+      state.todos = state.todos.filter((t) => t.id !== todo.id);
+      state.remaining = state.todos.filter((t) => !t.done).length;
+      state.total = state.todos.length;
+    }
 
     setTimeout(renderList, 180);
     try {
       const data = await api(`/todos/${encodeURIComponent(todo.id)}?date=${encodeURIComponent(state.date)}`, { method: 'DELETE' });
-      updateCounts(data);
+      if (state.month) { await refreshMonth(); }
+      else { updateCounts(data); }
       scheduleSidebarRefresh();
     } catch (err) {
-      state.todos = backup;
-      state.remaining = backup.filter((t) => !t.done).length;
-      state.total = backup.length;
+      if (state.month) {
+        state.monthTodos = backup;
+      } else {
+        state.todos = backup;
+        state.remaining = backup.filter((t) => !t.done).length;
+        state.total = backup.length;
+      }
       renderList();
       toast(err.message, 'err');
     }
   }
 
   el.clearDoneBtn.addEventListener('click', () => {
-    if (!state.todos.some((t) => t.done)) return;
+    const hasDone = state.month
+      ? state.monthTodos.some((t) => t.done)
+      : state.todos.some((t) => t.done);
+    if (!hasDone) return;
+
     armedClick(el.clearDoneBtn, '确认清除？', async () => {
       try {
-        await api('/todos/batch', { method: 'POST', body: { action: 'clear-completed', date: state.date } });
-        await refresh();
+        const body = state.month
+          ? { action: 'clear-completed', month: state.month }
+          : { action: 'clear-completed', date: state.date };
+        const data = await api('/todos/batch', { method: 'POST', body });
         scheduleSidebarRefresh();
-        toast('已清除完成的任务', 'ok');
+        if (state.month) {
+          await refreshMonth();
+          toast(`已清除本月 ${data.removed || 0} 项已完成任务`, 'ok');
+        } else {
+          await refresh();
+          toast('已清除完成的任务', 'ok');
+        }
       } catch (err) { toast(err.message, 'err'); }
     });
   });

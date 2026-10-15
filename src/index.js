@@ -178,6 +178,14 @@ async function route(request, env, ctx, url) {
   /* ---------- 待办 ---------- */
   if (path === '/api/todos' && method === 'GET') {
     const user = await auth.requireUser(request, env);
+
+    // 整月视图：/api/todos?month=YYYY-MM
+    if (url.searchParams.get('month')) {
+      const { month, todos: list } = await todos.listByMonth(env, user.id, url.searchParams.get('month'));
+      const remaining = list.filter((t) => !t.done).length;
+      return ok({ month, todos: list, remaining, total: list.length });
+    }
+
     const date = todos.normalizeDate(url.searchParams.get('date'));
     const list = await todos.listTodos(env, user.id, date);
     const stat = await todos.countByDate(env, user.id, date);
@@ -196,9 +204,16 @@ async function route(request, env, ctx, url) {
   if (path === '/api/todos/batch' && method === 'POST') {
     const user = await auth.requireUser(request, env);
     const body = await readJson(request);
-    const date = todos.normalizeDate(body.date);
+    // 按月操作时（如 clear-completed + month）可以不带 date
+    const date = todos.normalizeDate(body.date, '1970-01-01');
 
     if (body.action === 'clear-completed') {
+      // 支持按月清除：{ action: 'clear-completed', month: 'YYYY-MM' }
+      if (body.month) {
+        const res = await todos.clearCompletedMonth(env, user.id, body.month);
+        scheduleAutoBackup(ctx, env, user);
+        return ok(res);
+      }
       const res = await todos.clearCompleted(env, user.id, date);
       const stat = await todos.countByDate(env, user.id, date);
       scheduleAutoBackup(ctx, env, user);

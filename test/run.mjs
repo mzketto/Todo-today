@@ -543,6 +543,68 @@ test('全文搜索按日期倒序返回，并支持 #标签 过滤', async () =>
 });
 
 /* ============================================================
+ * 4. 整月视图
+ * ============================================================ */
+
+test('整月视图：返回该月所有日期的任务并正确计数', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'u1', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '月初', date: '2025-10-01' });
+  await h.call('POST', '/api/todos', { title: '月中', date: '2025-10-15' });
+  await h.call('POST', '/api/todos', { title: '月末', date: '2025-10-31' });
+  await h.call('POST', '/api/todos', { title: '隔壁月', date: '2025-11-02' });
+
+  const res = await h.call('GET', '/api/todos?month=2025-10');
+  assert.equal(res.status, 200);
+  assert.equal(res.data.month, '2025-10');
+  assert.equal(res.data.total, 3);
+  assert.equal(res.data.remaining, 3);
+  // 日期倒序、组内完整
+  const dates = [...new Set(res.data.todos.map((t) => t.date))];
+  assert.deepEqual(dates, ['2025-10-31', '2025-10-15', '2025-10-01']);
+});
+
+test('整月视图：非法月份返回 400', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'u1', password: 'secret123' });
+  const res = await h.call('GET', '/api/todos?month=2025-13');
+  assert.equal(res.status, 400);
+  assert.match(res.data.error, /YYYY-MM/);
+});
+
+test('按月清除已完成只影响该月', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'u1', password: 'secret123' });
+  const doneOct = (await h.call('POST', '/api/todos', { title: '十月完成', date: '2025-10-05' })).data.todo;
+  await h.call('POST', '/api/todos', { title: '十月未完成', date: '2025-10-06' });
+  const doneNov = (await h.call('POST', '/api/todos', { title: '十一月完成', date: '2025-11-01' })).data.todo;
+  await h.call('PATCH', `/api/todos/${doneOct.id}`, { done: true });
+  await h.call('PATCH', `/api/todos/${doneNov.id}`, { done: true });
+
+  const res = await h.call('POST', '/api/todos/batch', { action: 'clear-completed', month: '2025-10' });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.removed, 1);
+
+  const oct = await h.call('GET', '/api/todos?month=2025-10');
+  assert.equal(oct.data.total, 1);
+  assert.equal(oct.data.todos[0].title, '十月未完成');
+  const nov = await h.call('GET', '/api/todos?month=2025-11');
+  assert.equal(nov.data.total, 1);
+});
+
+test('整月视图遵循多用户数据隔离', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user-a', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: 'A 的任务', date: '2025-10-10' });
+  await h.call('POST', '/api/auth/logout', {});
+  await h.call('POST', '/api/auth/register', { username: 'user-b', password: 'secret123' });
+
+  const res = await h.call('GET', '/api/todos?month=2025-10');
+  assert.equal(res.status, 200);
+  assert.equal(res.data.total, 0);
+});
+
+/* ============================================================
  * 4. 数据库未初始化时的诊断
  * ============================================================ */
 
