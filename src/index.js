@@ -25,10 +25,64 @@ export default {
     } catch (err) {
       const status = err instanceof auth.HttpError ? err.status : 500;
       if (status >= 500) console.error('[api-error]', err?.stack || err);
-      return fail(err?.message || '服务器内部错误', status);
+      return fail(explainError(err, status), status);
     }
   },
 };
+
+const REQUIRED_TABLES = ['users', 'sessions', 'todos', 'settings'];
+
+/**
+ * 把底层报错翻译成「能照着做」的提示。
+ * 最常见的一类是 D1 建好了但没执行过 schema.sql，原始报文只有
+ * "D1_ERROR: no such table: users: SQLITE_ERROR"，对使用者毫无指向性。
+ */
+function explainError(err, status) {
+  const raw = String(err?.message || err || '');
+  if (status < 500) return raw || '请求有误';
+
+  if (/no such table/i.test(raw)) {
+    const table = raw.match(/no such table:\s*([^\s:]+)/i)?.[1] || '数据表';
+    return `数据库尚未初始化（缺少 ${table}）。请在 Cloudflare 控制台进入 D1 → 选择该数据库 → Console，粘贴执行项目里的 schema.sql；`
+      + '或在本地执行 npm run db:remote。执行完访问 /api/health?check=1 可确认。';
+  }
+  if (/no such column/i.test(raw)) {
+    return '数据库表结构过旧（缺少字段）。请重新执行一遍 schema.sql 升级表结构，再访问 /api/health?check=1 确认。';
+  }
+  if (/UNIQUE constraint failed/i.test(raw)) {
+    return '该记录已存在（唯一约束冲突）。';
+  }
+  if (/network connection lost|internal error|storage.*(error|failure)/i.test(raw)) {
+    return '数据库暂时不可用，请稍后重试。';
+  }
+  return raw || '服务器内部错误';
+}
+
+/** 连库核对必需的数据表是否都已建好，供 /api/health?check=1 使用 */
+async function inspectSchema(env) {
+  try {
+    const { results } = await env.DB
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all();
+    const existing = new Set((results || []).map((r) => r.name));
+    const tables = REQUIRED_TABLES.filter((t) => existing.has(t));
+    const missing = REQUIRED_TABLES.filter((t) => !existing.has(t));
+    return {
+      ok: missing.length === 0,
+      tables,
+      missing,
+      hint: missing.length
+        ? '缺少数据表：在 Cloudflare 控制台进入该 D1 数据库 → Console，执行 schema.sql 后重试'
+        : '数据表齐全',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: String(err?.message || err),
+      hint: '无法读取数据库结构：请确认 Worker 的绑定名称是 DB，且指向的是正确的数据库',
+    };
+  }
+}
 
 /**
  * 静态资源：
@@ -70,14 +124,20 @@ async function route(request, env, ctx, url) {
   }
 
   /* ---------- 健康检查 ---------- */
+  // /api/health          只报绑定情况，不碰数据库
+  // /api/health?check=1  额外连库核对数据表是否已建好（部署后自查用）
   if (path === '/api/health' && method === 'GET') {
-    return ok({
+    const payload = {
       app: env.APP_NAME || '今日待办',
       time: new Date().toISOString(),
       db: !!env.DB,
       r2: !!env.BACKUPS,
       registration: String(env.ALLOW_REGISTRATION ?? 'true').toLowerCase() !== 'false',
-    });
+    };
+    if (url.searchParams.get('check') === '1' && env.DB) {
+      payload.schema = await inspectSchema(env);
+    }
+    return ok(payload);
   }
 
   /* ---------- 认证 ---------- */
@@ -174,6 +234,19 @@ async function route(request, env, ctx, url) {
     const days = url.searchParams.get('days');
     const stats = await todos.statsByDate(env, user.id, days);
     return ok({ stats });
+  }
+
+  /* ---------- 搜索 / 标签 ---------- */
+  if (path === '/api/search' && method === 'GET') {
+    const user = await auth.requireUser(request, env);
+    const q = url.searchParams.get('q') || '';
+    return ok({ q, todos: await todos.searchTodos(env, user.id, q) });
+  }
+
+  if (path === '/api/tags' && method === 'GET') {
+    const user = await auth.requireUser(request, env);
+    const limit = url.searchParams.get('limit');
+    return ok({ tags: await todos.listTags(env, user.id, limit) });
   }
 
   const todoMatch = path.match(/^\/api\/todos\/([^/]+)$/);

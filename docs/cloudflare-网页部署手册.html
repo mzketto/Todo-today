@@ -187,9 +187,9 @@
   </div>
 </header>
 
-<h2>0 · 开始之前</h2>
+<h2 id="0-开始之前">0 · 开始之前</h2>
 
-<h3>你需要准备</h3>
+<h3 id="你需要准备">你需要准备</h3>
 <ul class="tight">
   <li>一个 Cloudflare 账号（<a href="https://dash.cloudflare.com/sign-up">dash.cloudflare.com</a> 免费注册，无需信用卡）</li>
   <li>本项目的全部文件，其中两个文件会在下面被复制粘贴：
@@ -209,7 +209,7 @@
   功能与命令行部署完全一致，只是少了一层目录拆分。
 </div>
 
-<h3>两种部署方式怎么选</h3>
+<h3 id="两种部署方式怎么选">两种部署方式怎么选</h3>
 <div class="tw">
 <table>
   <thead>
@@ -226,10 +226,10 @@
   方案 B 见文末附录 B。两条路用的是同一份源码，可以先用方案 A 上线，日后再迁到方案 B。
 </p>
 
-<h2>① 创建数据库（D1）</h2>
+<h2 id="①-创建数据库-d1">① 创建数据库（D1）</h2>
 
 <div class="step">
-  <h3><span class="num">1</span>新建 D1 数据库</h3>
+  <h3 id="1新建-d1-数据库"><span class="num">1</span>新建 D1 数据库</h3>
   <p class="goal">目标：得到一个空的 SQL 数据库，用来存账号和待办。</p>
   <ol class="acts">
     <li>登录 <a href="https://dash.cloudflare.com">dash.cloudflare.com</a>。</li>
@@ -245,7 +245,7 @@
 </div>
 
 <div class="step">
-  <h3><span class="num">2</span>执行建表语句</h3>
+  <h3 id="2执行建表语句"><span class="num">2</span>执行建表语句</h3>
   <p class="goal">目标：把 users / sessions / todos / settings 四张表建出来。</p>
   <ol class="acts">
     <li>用文本编辑器打开项目里的 <code>schema.sql</code>，<strong>全选并复制</strong>全文。</li>
@@ -258,12 +258,20 @@
     <span class="t">这段 SQL 可以重复执行</span>
     全部语句都带 <code>IF NOT EXISTS</code>，重复执行不会报错、也不会清空已有数据。
   </div>
+  <div class="callout danger">
+    <span class="t">务必确认执行的是「远程」数据库</span>
+    Console 页面上会标注当前目标（<strong>Remote / 远程</strong> 还是 <strong>Local / 本地实例</strong>），
+    请确保是远程。如果建成了本地表，线上注册时依然会报
+    <code>no such table: users</code>。等后面把 Worker 部署上线后，可以访问
+    <code>https://你的地址/api/health?check=1</code> 复核，看到
+    <code>"schema":{"ok":true,...}</code> 才算真的建好了。
+  </div>
 </div>
 
-<h2>② 创建 Worker 并粘贴代码</h2>
+<h2 id="②-创建-worker-并粘贴代码">② 创建 Worker 并粘贴代码</h2>
 
 <div class="step">
-  <h3><span class="num">3</span>创建一个空 Worker</h3>
+  <h3 id="3创建一个空-worker"><span class="num">3</span>创建一个空 Worker</h3>
   <p class="goal">目标：先拿到一个占位的 Worker，再去编辑它的代码。</p>
   <ol class="acts">
     <li>左侧导航进入 <span class="path">Workers &amp; Pages</span>。</li>
@@ -278,7 +286,7 @@
 </div>
 
 <div class="step">
-  <h3><span class="num">4</span>把单文件代码粘进去</h3>
+  <h3 id="4把单文件代码粘进去"><span class="num">4</span>把单文件代码粘进去</h3>
   <p class="goal">目标：让 Worker 变成「今日待办」。</p>
   <ol class="acts">
     <li>在 Worker 详情页点 <strong>Edit code / 编辑代码</strong>，打开在线编辑器。</li>
@@ -291,7 +299,7 @@
   </ol>
   <div class="callout warn">
     <span class="t">必须粘贴完整，一行都不能少</span>
-    文件约 <strong>2600 行 / 158 KB</strong>，其中大量长字符串是内联进去的网页文件。
+    文件约 <strong>3100 行 / 200 KB</strong>，其中大量长字符串是内联进去的网页文件。
     如果粘贴后页面显示空白或样式全丢，多半是复制不完整——重新全选复制一次即可。
     粘贴后建议在编辑器里按 <code>Ctrl+End</code> 跳到文件末尾，
     确认最后一行是 <code>};</code> 且不是半截内容。
@@ -302,10 +310,10 @@
   </div>
 </div>
 
-<h2>③ 绑定数据库</h2>
+<h2 id="③-绑定数据库">③ 绑定数据库</h2>
 
 <div class="step">
-  <h3><span class="num">5</span>把 D1 绑定到 Worker</h3>
+  <h3 id="5把-d1-绑定到-worker"><span class="num">5</span>把 D1 绑定到 Worker</h3>
   <p class="goal">目标：让 Worker 里的 <code>env.DB</code> 指向刚才创建的数据库。</p>
   <ol class="acts">
     <li>进入这个 Worker 的 <strong>Settings / 设置</strong> 页面。</li>
@@ -327,10 +335,10 @@
     看到 <code>{"ok":true,...,"db":true,...}</code> 就说明绑定成功了。</p>
 </div>
 
-<h2>④ 设置环境变量</h2>
+<h2 id="④-设置环境变量">④ 设置环境变量</h2>
 
 <div class="step">
-  <h3><span class="num">6</span>添加变量（可选但建议）</h3>
+  <h3 id="6添加变量-可选但建议"><span class="num">6</span>添加变量（可选但建议）</h3>
   <p class="goal">目标：配置站点名称，并决定是否开放注册。</p>
   <ol class="acts">
     <li>Worker 的 <strong>Settings / 设置</strong> 页面，找到
@@ -354,12 +362,15 @@
   </div>
 </div>
 
-<h2>⑤ 上线检查</h2>
+<h2 id="⑤-上线检查">⑤ 上线检查</h2>
 
 <div class="step">
-  <h3><span class="num">7</span>走一遍完整流程</h3>
+  <h3 id="7走一遍完整流程"><span class="num">7</span>走一遍完整流程</h3>
   <p class="goal">目标：确认所有功能都正常。</p>
   <ul class="checklist">
+    <li>访问 <code>/api/health?check=1</code> → 返回
+        <code>"schema":{"ok":true,"missing":[]}</code>（<strong>最先验这个</strong>，
+        能一次性排掉「没建表」「绑定名写错」两类问题）</li>
     <li>打开站点，能看到「今日待办」的登录界面，并且底部是「登录 / 注册」两个标签页</li>
     <li>切到「注册」，用任意用户名 + 6 位以上密码创建账号 → 成功进入主界面</li>
     <li>在输入框输入一件事，回车 → 列表出现这条待办，底部计数变成「1 项待完成」</li>
@@ -373,7 +384,7 @@
   </ul>
 </div>
 
-<h2>⑥ 可选：配置云备份</h2>
+<h2 id="⑥-可选-配置云备份">⑥ 可选：配置云备份</h2>
 
 <p style="color:var(--ink-2);font-size:14px">
   主线功能到上一步就完成了。下面是可选的「再存一份到别处」，三种方式选一种即可。
@@ -381,7 +392,7 @@
 </p>
 
 <div class="step">
-  <h3><span class="num">A</span>Cloudflare R2（原生绑定，无需密钥）</h3>
+  <h3 id="acloudflare-r2-原生绑定-无需密钥"><span class="num">A</span>Cloudflare R2（原生绑定，无需密钥）</h3>
   <p class="goal">目标：把备份写进 R2 存储桶。</p>
   <ol class="acts">
     <li>左侧导航进入 <span class="path">R2 对象存储<span class="sep">›</span>创建存储桶</span>。</li>
@@ -409,7 +420,7 @@
 </div>
 
 <div class="step">
-  <h3><span class="num">B</span>S3 兼容对象存储（含 R2 / AWS / MinIO / 阿里云 OSS 等）</h3>
+  <h3 id="bs3-兼容对象存储-含-r2-aws-minio-阿里云-oss-等"><span class="num">B</span>S3 兼容对象存储（含 R2 / AWS / MinIO / 阿里云 OSS 等）</h3>
   <p class="goal">目标：用密钥直连任意 S3 兼容服务。</p>
   <p>在站点的<strong>设置抽屉 → 云备份</strong>里选「S3 兼容对象存储」，按下表填写：</p>
   <div class="tw">
@@ -435,7 +446,7 @@
 </div>
 
 <div class="step">
-  <h3><span class="num">C</span>WebDAV（坚果云 / Nextcloud / 群晖等）</h3>
+  <h3 id="cwebdav-坚果云-nextcloud-群晖等"><span class="num">C</span>WebDAV（坚果云 / Nextcloud / 群晖等）</h3>
   <p class="goal">目标：备份到自己的网盘目录。</p>
   <p>在<strong>设置抽屉 → 云备份</strong>里选「WebDAV」，填写：</p>
   <div class="tw">
@@ -455,10 +466,10 @@
   </div>
 </div>
 
-<h2>⑦ 可选：绑定自己的域名</h2>
+<h2 id="⑦-可选-绑定自己的域名">⑦ 可选：绑定自己的域名</h2>
 
 <div class="step">
-  <h3><span class="num">＋</span>用自定义域名访问</h3>
+  <h3 id="用自定义域名访问"><span class="num">＋</span>用自定义域名访问</h3>
   <ol class="acts">
     <li>Worker 的 <strong>Settings / 设置</strong> 页面，找到 <strong>Domains &amp; Routes / 域和路由</strong>。</li>
     <li>点 <strong>Add / 添加 › Custom domain / 自定义域</strong>。</li>
@@ -468,7 +479,7 @@
      证书由 Cloudflare 自动签发，无需额外操作。</p>
 </div>
 
-<h2>⑧ 以后怎么更新代码</h2>
+<h2 id="⑧-以后怎么更新代码">⑧ 以后怎么更新代码</h2>
 
 <p>如果你改动了 <code>src/</code> 或 <code>public/</code> 里的源码，需要重新生成单文件并替换：</p>
 <ol class="acts">
@@ -483,7 +494,24 @@
   同样要走这个流程——前端文件是被打包进 Worker 的，不是独立上传的。
 </div>
 
-<h2>常见问题</h2>
+<h2 id="常见问题">常见问题</h2>
+
+<details open>
+  <summary>注册时提示 <code>D1_ERROR: no such table: users: SQLITE_ERROR</code></summary>
+  <p>这是<strong>最常见</strong>的一个问题：数据库本身建好了、也绑上了，但库里还是空的 ——
+     也就是<strong>第 ② 步的建表没做，或者做在了本地实例上</strong>。</p>
+  <p>回到 <strong>D1</strong> → 点进你的 <code>todo-today</code> 数据库 →
+     切到 <strong>Console（控制台）</strong> 标签页 → 把项目里的 <code>schema.sql</code>
+     全文粘进输入框 → 点 <strong>Execute（执行）</strong>。</p>
+  <p>执行完刷新页面重新注册即可。想确认是否成功，访问
+     <code>https://你的地址/api/health?check=1</code>，看到下面这样就说明表齐了：</p>
+  <pre><code>{"ok":true,"db":true,"schema":{"ok":true,"tables":["users","sessions","todos","settings"],"missing":[]}}</code></pre>
+  <div class="callout warn">
+    <span class="t">注意别执行到本地实例上</span>
+    <p>Database 的 Console 里不要选成 <strong>Local / 本地实例</strong>，
+       要选<strong>远程的那个数据库</strong>，否则线上依然是空表。页面上会标注当前的执行目标是本地还是远程。</p>
+  </div>
+</details>
 
 <details>
   <summary>打开站点是空白页，或样式全部丢失</summary>
@@ -496,6 +524,8 @@
   <p>说明第 ③ 步的绑定没做或名称不对。检查
      <strong>Settings › Bindings</strong> 里的变量名是否<strong>精确等于</strong>
      <code>DB</code>（大写，无空格）。</p>
+  <p>注意和上一条区别开：报 <code>未绑定 D1 数据库</code> 是<strong>没连上库</strong>；
+     报 <code>no such table</code> 是<strong>连上了但没建表</strong>。</p>
 </details>
 
 <details>
@@ -503,6 +533,8 @@
   <p>访问 <code>https://你的地址/api/health</code>。正常会返回类似：</p>
   <pre><code>{"ok":true,"app":"今日待办","db":true,"r2":false,"registration":true}</code></pre>
   <p><code>db:false</code> 表示 D1 没绑上；<code>r2:false</code> 只是说明没配 R2 备份，不影响使用。</p>
+  <p>加上 <code>?check=1</code> 则会真的连一次数据库，并把缺失的数据表列出来 ——
+     部署完自查时建议用这个：<code>/api/health?check=1</code>。</p>
 </details>
 
 <details>
@@ -535,7 +567,7 @@
 
 <hr />
 
-<h2>附录 A · 所有名称对照表</h2>
+<h2 id="附录-a-所有名称对照表">附录 A · 所有名称对照表</h2>
 <p>下面这些名字必须一字不差，建议部署时对照本表逐个核对。</p>
 <div class="tw">
 <table>
@@ -553,7 +585,7 @@
 </table>
 </div>
 
-<h2>附录 B · 方案 B：用 Git 自动构建</h2>
+<h2 id="附录-b-方案-b-用-git-自动构建">附录 B · 方案 B：用 Git 自动构建</h2>
 <p>适合需要长期维护的场景。代价是需要一个 GitHub 账号和仓库。</p>
 <ol class="acts">
   <li>把整个项目（不含 <code>node_modules</code> 和 <code>dist</code>）推送到 GitHub 仓库。</li>

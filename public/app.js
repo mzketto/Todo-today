@@ -50,9 +50,36 @@
     addForm: $('add-form'),
     addInput: $('add-input'),
     addHint: $('add-hint'),
+    composerDate: $('composer-date'),
+    composerDateText: $('composer-date-text'),
+    composerDateInput: $('composer-date-input'),
 
-    list: $('todo-list'),
+    // 侧栏
+    sidebar: $('sidebar'),
+    sideMask: $('side-mask'),
+    sideToggle: $('side-toggle'),
+    searchInput: $('search-input'),
+    searchClear: $('search-clear'),
+    statDays: $('stat-days'),
+    statTotal: $('stat-total'),
+    statDone: $('stat-done'),
+    calTitle: $('cal-title'),
+    calPrev: $('cal-prev'),
+    calNext: $('cal-next'),
+    calendar: $('calendar'),
+    tagsBlock: $('tags-block'),
+    tagsList: $('tags-list'),
+    timelineBlock: $('timeline-block'),
+    timelineList: $('timeline-list'),
+
+    // 卡片流
+    feed: $('feed'),
+    searchBanner: $('search-banner'),
+    searchBannerText: $('search-banner-text'),
+    searchExit: $('search-exit'),
     emptyState: $('empty-state'),
+    emptyTitle: $('empty-title'),
+    emptySub: $('empty-sub'),
     remainingCount: $('remaining-count'),
     remainingLabel: $('remaining-label'),
     carryoverBtn: $('carryover-btn'),
@@ -112,7 +139,14 @@
     demo: false,
     apiConfirmed: false,
     busy: false,
+    // 侧栏
+    stats: [],            // [{ date, remaining, total }] 按日期倒序
+    tags: [],             // [{ name, count }]
+    cal: (() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; })(),
+    search: { q: '', active: false, loading: false, results: [] },
   };
+
+  const TAG_RE = /#([^\s#]{1,24})/g;
 
   /* ------------------------------------------------------------------ *
    * 工具函数
@@ -148,14 +182,16 @@
   }
 
   function toast(message, kind = '', duration = 2400) {
+    const text = String(message ?? '');
+    const long = text.length > 56;   // 长文案改用卡片样式并多停留一会儿
     const node = document.createElement('div');
-    node.className = `toast ${kind}`;
-    node.textContent = message;
+    node.className = `toast ${kind}${long ? ' long' : ''}`;
+    node.textContent = text;
     el.toastHost.appendChild(node);
     setTimeout(() => {
       node.classList.add('leaving');
       setTimeout(() => node.remove(), 240);
-    }, duration);
+    }, long ? Math.max(duration, 7000) : duration);
   }
 
   function setStatus(node, text, kind = 'busy') {
@@ -244,6 +280,31 @@
     }
 
     if (!db.user) throw new ApiError('请先登录', 401);
+
+    /* --- 搜索 / 标签 --- */
+    if (seg[0] === 'search' && method === 'GET') {
+      const q = (params.get('q') || '').trim().toLowerCase();
+      const list = db.todos
+        .filter((t) => t.title.toLowerCase().includes(q))
+        .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt))
+        .slice(0, 50);
+      return { ok: true, q, todos: list };
+    }
+
+    if (seg[0] === 'tags' && method === 'GET') {
+      const counter = new Map();
+      db.todos.forEach((t) => {
+        const tags = String(t.title || '').match(/#([^\s#]{1,24})/g) || [];
+        tags.forEach((raw) => {
+          const name = raw.slice(1);
+          counter.set(name, (counter.get(name) || 0) + 1);
+        });
+      });
+      const tags = Array.from(counter, ([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hans-CN'))
+        .slice(0, 30);
+      return { ok: true, tags };
+    }
 
     /* --- todos --- */
     if (seg[0] === 'todos') {
@@ -411,18 +472,24 @@
     const db = demoRead();
     if (db.user) return;
     const today = todayStr();
+    const day = (delta) => shiftDate(today, delta);
+    // [标题, 是否完成, 日期偏移]
     const samples = [
-      ['把季度汇报的提纲写完', false],
-      ['回复客户的邮件', true],
-      ['预约周五的体检', false],
-      ['晚上 8 点去健身房', false],
+      ['把季度汇报的提纲写完 #工作', false, 0],
+      ['回复客户的邮件 #工作', true, 0],
+      ['预约周五的体检 #生活', false, 0],
+      ['晚上 8 点去健身房 #生活', false, -1],
+      ['读完《卡片笔记写作法》第三章 #阅读', false, -1],
+      ['给阳台的绿萝浇水 #生活', true, -2],
+      ['整理下一步的旅行清单 #生活', false, -4],
+      ['review 同事的方案文档 #工作', true, -5],
     ];
     db.user = { id: 'demo-user', username: 'demo', createdAt: Math.floor(Date.now() / 1000) };
-    db.todos = samples.map(([title, done], i) => ({
+    db.todos = samples.map(([title, done, delta], i) => ({
       id: demoId(),
       title,
       done,
-      date: today,
+      date: day(delta),
       order: i,
       createdAt: Math.floor(Date.now() / 1000) + i,
     }));
@@ -446,10 +513,16 @@
     el.userInitial.textContent = (state.user?.username || 'U').slice(0, 1).toUpperCase();
     el.accountName.textContent = state.user?.username || '-';
     await refresh();
+    loadSidebarData();
     await loadBackupConfig();
     el.addInput.focus({ preventScroll: true });
     // ?panel=settings 用于直接打开设置抽屉（演示/截图用）
     if (URL_PARAMS.get('panel') === 'settings') openDrawer();
+    // ?panel=sidebar 用于直接展开移动端侧栏（截图用）
+    if (URL_PARAMS.get('panel') === 'sidebar') openSidebar();
+    // ?q=xxx 直接进入搜索状态（演示/截图用）
+    const q = URL_PARAMS.get('q');
+    if (q) startSearch(q);
   }
 
   /* ------------------------------------------------------------------ *
@@ -534,8 +607,18 @@
     el.pageDate.textContent = sub;
     el.datePillText.textContent = `${state.date} ${WEEKDAYS[weekdayOf(state.date)]}`;
     el.dateInput.value = state.date;
+    el.composerDateText.textContent = title === '今天' ? '今天' : `${state.date.slice(5)} ${WEEKDAYS[weekdayOf(state.date)]}`;
+    el.composerDateInput.value = state.date;
     const isToday = state.date === todayStr();
     el.carryoverBtn.style.visibility = isToday ? 'visible' : 'hidden';
+    // 日历视图跟随所选日期
+    const [y, m] = state.date.split('-').map(Number);
+    if (state.cal.y !== y || state.cal.m !== m - 1) {
+      state.cal = { y, m: m - 1 };
+      renderCalendar();
+    } else {
+      renderCalendar();   // 重新标亮选中日
+    }
   }
 
   el.prevDay.addEventListener('click', () => gotoDate(shiftDate(state.date, -1)));
@@ -543,28 +626,49 @@
   el.dateInput.addEventListener('change', () => {
     if (/^\d{4}-\d{2}-\d{2}$/.test(el.dateInput.value)) gotoDate(el.dateInput.value);
   });
+  el.composerDateInput.addEventListener('change', () => {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(el.composerDateInput.value)) gotoDate(el.composerDateInput.value);
+  });
 
   async function gotoDate(date) {
+    if (state.search.active || el.searchInput.value) exitSearch();
     state.date = date;
     renderDate();
+    closeSidebar();
     await refresh();
   }
 
   /* ------------------------------------------------------------------ *
-   * 列表渲染
+   * 卡片流渲染
    * ------------------------------------------------------------------ */
   function renderList() {
-    el.list.innerHTML = '';
+    el.feed.innerHTML = '';
 
+    if (state.search.active) {
+      el.searchBanner.classList.remove('hidden');
+      el.searchBannerText.textContent = state.search.loading
+        ? `正在搜索「${state.search.q}」…`
+        : `搜索「${state.search.q}」：${state.search.results.length} 条结果`;
+      renderSearchResults();
+      return;
+    }
+
+    el.searchBanner.classList.add('hidden');
+    renderDayList();
+  }
+
+  /** 当前日期的待办卡片 */
+  function renderDayList() {
     if (!state.todos.length) {
       el.emptyState.classList.remove('hidden');
+      el.emptyTitle.textContent = '这里还没有安排';
+      el.emptySub.textContent = '在上面的输入框敲下第一件事吧';
     } else {
       el.emptyState.classList.add('hidden');
       const fragment = document.createDocumentFragment();
-      state.todos.forEach((todo) => fragment.appendChild(renderItem(todo)));
-      el.list.appendChild(fragment);
+      state.todos.forEach((todo) => fragment.appendChild(renderItem(todo, { showDate: false })));
+      el.feed.appendChild(fragment);
     }
-
     el.remainingCount.textContent = String(state.remaining);
     el.remainingLabel.textContent = state.remaining === 0
       ? (state.total ? '全部完成 🎉' : '项待完成')
@@ -572,13 +676,88 @@
     el.clearDoneBtn.disabled = !state.todos.some((t) => t.done);
   }
 
+  /** 搜索结果：按日期分组展示 */
+  function renderSearchResults() {
+    if (!state.search.results.length) {
+      el.emptyState.classList.remove('hidden');
+      el.emptyTitle.textContent = state.search.loading ? '正在搜索…' : '没有找到匹配的任务';
+      el.emptySub.textContent = state.search.loading ? '' : '换个关键词试试，#标签 也可以直接搜';
+      return;
+    }
+    el.emptyState.classList.add('hidden');
+
+    const groups = new Map();
+    for (const todo of state.search.results) {
+      if (!groups.has(todo.date)) groups.set(todo.date, []);
+      groups.get(todo.date).push(todo);
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const [date, list] of groups) {
+      const head = document.createElement('div');
+      head.className = 'feed-date-head';
+      const { title } = humanDate(date);
+      head.append(
+        Object.assign(document.createElement('span'), { textContent: title }),
+        Object.assign(document.createElement('small'), { textContent: date }),
+        Object.assign(document.createElement('span'), {
+          className: 'feed-date-count',
+          textContent: `${list.filter((t) => !t.done).length} 项未完成 / 共 ${list.length}`,
+        }),
+      );
+      fragment.appendChild(head);
+      list.forEach((todo) => fragment.appendChild(renderItem(todo, { showDate: false })));
+    }
+    el.feed.appendChild(fragment);
+  }
+
   const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
   const TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>';
+  const PENCIL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
 
-  function renderItem(todo) {
-    const li = document.createElement('li');
-    li.className = `todo-item${todo.done ? ' done' : ''}`;
-    li.dataset.id = todo.id;
+  function formatTime(unix) {
+    const d = new Date((Number(unix) || 0) * 1000);
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function renderItem(todo, { showDate = false } = {}) {
+    const card = document.createElement('article');
+    card.className = `memo${todo.done ? ' done' : ''}`;
+    card.dataset.id = todo.id;
+
+    /* meta 行：时间 + 操作 */
+    const meta = document.createElement('div');
+    meta.className = 'memo-meta';
+
+    const time = document.createElement('span');
+    time.className = 'memo-time';
+    const created = new Date((Number(todo.createdAt) || 0) * 1000);
+    const dateText = showDate
+      ? `${created.getFullYear()}/${pad(created.getMonth() + 1)}/${pad(created.getDate())} `
+      : '';
+    time.textContent = `${dateText}${formatTime(todo.createdAt)}`;
+
+    const acts = document.createElement('span');
+    acts.className = 'memo-acts';
+
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.setAttribute('aria-label', '编辑任务');
+    edit.innerHTML = PENCIL_SVG;
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'memo-del';
+    del.setAttribute('aria-label', '删除任务');
+    del.innerHTML = TRASH_SVG;
+    del.addEventListener('click', () => deleteTodo(todo, card));
+
+    acts.append(edit, del);
+    meta.append(time, acts);
+
+    /* body：勾选 + 内容 */
+    const body = document.createElement('div');
+    body.className = 'memo-body';
 
     const check = document.createElement('button');
     check.type = 'button';
@@ -589,24 +768,42 @@
     check.addEventListener('click', () => toggleTodo(todo));
 
     const text = document.createElement('div');
-    text.className = 'todo-text';
-    text.textContent = todo.title;
+    text.className = 'memo-text';
     text.title = '长按或双击可编辑';
-    bindEdit(li, text, todo);
+    renderTitleWithTags(text, todo.title);
+    const editApi = bindEdit(card, text, todo);
+    edit.addEventListener('click', () => editApi.enterEdit());
 
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'todo-del';
-    del.setAttribute('aria-label', '删除任务');
-    del.innerHTML = TRASH_SVG;
-    del.addEventListener('click', () => deleteTodo(todo, li));
-
-    li.append(check, text, del);
-    return li;
+    body.append(check, text);
+    card.append(meta, body);
+    return card;
   }
 
-  /** 长按 / 双击进入行内编辑 */
-  function bindEdit(li, node, todo) {
+  /** 把标题里的 #标签 渲染成可点击的徽片（其余保持纯文本，防 XSS） */
+  function renderTitleWithTags(container, title) {
+    const re = new RegExp(TAG_RE.source, 'g');
+    let last = 0;
+    let match;
+    while ((match = re.exec(title))) {
+      if (match.index > last) {
+        container.appendChild(document.createTextNode(title.slice(last, match.index)));
+      }
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'tag-chip';
+      chip.textContent = `#${match[1]}`;
+      chip.title = `查看 #${match[1]} 的全部任务`;
+      chip.addEventListener('click', () => startSearch(`#${match[1]}`));
+      container.appendChild(chip);
+      last = match.index + match[0].length;
+    }
+    if (last < title.length) {
+      container.appendChild(document.createTextNode(title.slice(last)));
+    }
+  }
+
+  /** 长按 / 双击 / 铅笔进入行内编辑 */
+  function bindEdit(card, node, todo) {
     let timer = null;
 
     const start = () => {
@@ -625,6 +822,8 @@
     function enterEdit() {
       if (node.isContentEditable) return;
       const original = todo.title;
+      // 先拍平成纯文本再编辑（去掉标签徽片）
+      node.textContent = original;
       node.contentEditable = 'true';
       node.focus();
       document.getSelection()?.selectAllChildren(node);
@@ -634,7 +833,8 @@
         const next = node.textContent.replace(/\s+/g, ' ').trim();
 
         if (!save || !next || next === original) {
-          node.textContent = original;
+          node.textContent = '';
+          renderTitleWithTags(node, original);
           return;
         }
         node.textContent = next;
@@ -642,9 +842,12 @@
           const data = await api(`/todos/${encodeURIComponent(todo.id)}`, { method: 'PATCH', body: { title: next } });
           Object.assign(todo, { title: next });
           updateCounts(data);
+          scheduleSidebarRefresh();
         } catch (err) {
-          node.textContent = original;
           toast(err.message, 'err');
+        } finally {
+          node.textContent = '';
+          renderTitleWithTags(node, todo.title);
         }
       };
 
@@ -661,6 +864,8 @@
       node.addEventListener('keydown', onKey);
       node.addEventListener('blur', onBlur);
     }
+
+    return { enterEdit };
   }
 
   function updateCounts(data) {
@@ -687,6 +892,212 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * 侧栏：统计 / 日历 / 标签 / 时间线
+   * ------------------------------------------------------------------ */
+  let sidebarTimer = null;
+  /** 数据变更后静默刷新侧栏（防抖，避免频繁请求） */
+  function scheduleSidebarRefresh() {
+    clearTimeout(sidebarTimer);
+    sidebarTimer = setTimeout(loadSidebarData, 900);
+  }
+
+  async function loadSidebarData() {
+    try {
+      const [statsRes, tagsRes] = await Promise.all([
+        api('/todos/stats?days=365'),
+        api('/tags'),
+      ]);
+      state.stats = statsRes.stats || [];
+      state.tags = tagsRes.tags || [];
+    } catch { /* 静默失败，不影响主流程 */ }
+    renderStats();
+    renderCalendar();
+    renderTags();
+    renderTimeline();
+  }
+
+  function renderStats() {
+    let total = 0;
+    let remaining = 0;
+    for (const s of state.stats) { total += s.total; remaining += s.remaining; }
+    el.statDays.textContent = String(state.stats.length);
+    el.statTotal.textContent = String(total);
+    el.statDone.textContent = String(total - remaining);
+  }
+
+  function renderCalendar() {
+    const { y, m } = state.cal;
+    el.calTitle.textContent = `${y} 年 ${m + 1} 月`;
+    el.calendar.innerHTML = '';
+
+    const byDate = new Map(state.stats.map((s) => [s.date, s]));
+    const today = todayStr();
+    for (const name of ['日', '一', '二', '三', '四', '五', '六']) {
+      el.calendar.appendChild(Object.assign(document.createElement('span'), { className: 'cal-dow', textContent: name }));
+    }
+
+    const firstDow = new Date(y, m, 1).getDay();
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    for (let i = 0; i < firstDow; i += 1) {
+      el.calendar.appendChild(Object.assign(document.createElement('span'), { className: 'cal-blank' }));
+    }
+    for (let d = 1; d <= daysInMonth; d += 1) {
+      const dateStr = `${y}-${pad(m + 1)}-${pad(d)}`;
+      const info = byDate.get(dateStr);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'cal-day'
+        + (info ? ' has-tasks' : '')
+        + (dateStr === today ? ' is-today' : '')
+        + (dateStr === state.date ? ' is-selected' : '');
+      btn.textContent = String(d);
+      if (info) {
+        btn.title = `${dateStr} · ${info.remaining} 项未完成 / 共 ${info.total}`;
+        btn.appendChild(Object.assign(document.createElement('span'), { className: 'dot' }));
+      }
+      btn.addEventListener('click', () => gotoDate(dateStr));
+      el.calendar.appendChild(btn);
+    }
+  }
+
+  el.calPrev.addEventListener('click', () => shiftMonth(-1));
+  el.calNext.addEventListener('click', () => shiftMonth(1));
+  function shiftMonth(delta) {
+    const d = new Date(state.cal.y, state.cal.m + delta, 1);
+    state.cal = { y: d.getFullYear(), m: d.getMonth() };
+    renderCalendar();
+  }
+
+  function renderTags() {
+    el.tagsBlock.classList.toggle('hidden', !state.tags.length);
+    el.tagsList.innerHTML = '';
+    state.tags.forEach(({ name, count }) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'tag-row';
+      row.title = `查看 #${name} 的全部任务`;
+      row.append(
+        Object.assign(document.createElement('span'), { className: 'tag-hash', textContent: '#' }),
+        Object.assign(document.createElement('span'), { textContent: name }),
+        Object.assign(document.createElement('b'), { textContent: String(count) }),
+      );
+      row.addEventListener('click', () => startSearch(`#${name}`));
+      el.tagsList.appendChild(row);
+    });
+  }
+
+  function renderTimeline() {
+    el.timelineBlock.classList.toggle('hidden', !state.stats.length);
+    el.timelineList.innerHTML = '';
+
+    // stats 已按日期倒序：按 年 → 月 聚合，记录每月/每年最近一个有任务的日期
+    const years = new Map();
+    for (const s of state.stats) {
+      const [y, m] = s.date.split('-').map(Number);
+      if (!years.has(y)) years.set(y, { count: 0, latest: s.date, months: new Map() });
+      const year = years.get(y);
+      year.count += s.total;
+      if (!year.months.has(m)) year.months.set(m, { count: 0, latest: s.date });
+      year.months.get(m).count += s.total;
+    }
+
+    for (const [y, year] of years) {
+      const yearRow = document.createElement('div');
+      yearRow.className = 'tl-year';
+      yearRow.append(
+        Object.assign(document.createElement('span'), { textContent: String(y) }),
+        Object.assign(document.createElement('small'), { textContent: `${year.count} 条` }),
+      );
+      yearRow.addEventListener('click', () => gotoDate(year.latest));
+      el.timelineList.appendChild(yearRow);
+
+      const months = document.createElement('div');
+      months.className = 'tl-months';
+      for (const [m, info] of Array.from(year.months).sort((a, b) => b[0] - a[0])) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tl-month';
+        btn.append(
+          document.createTextNode(`${m} 月`),
+          Object.assign(document.createElement('b'), { textContent: String(info.count) }),
+        );
+        btn.addEventListener('click', () => gotoDate(info.latest));
+        months.appendChild(btn);
+      }
+      el.timelineList.appendChild(months);
+    }
+  }
+
+  /* ------------------------------ 侧栏开合（移动端抽屉） ------------------------------ */
+  function openSidebar() {
+    document.body.classList.add('side-open');
+    el.sideMask.classList.remove('hidden');
+  }
+  function closeSidebar() {
+    document.body.classList.remove('side-open');
+    el.sideMask.classList.add('hidden');
+  }
+  el.sideToggle.addEventListener('click', openSidebar);
+  el.sideMask.addEventListener('click', closeSidebar);
+  window.addEventListener('resize', () => { if (window.innerWidth >= 980) closeSidebar(); });
+
+  /* ------------------------------------------------------------------ *
+   * 搜索
+   * ------------------------------------------------------------------ */
+  let searchTimer = null;
+
+  el.searchInput.addEventListener('input', () => {
+    const q = el.searchInput.value.trim();
+    el.searchClear.classList.toggle('hidden', !q);
+    clearTimeout(searchTimer);
+    if (!q) { exitSearch(); return; }
+    searchTimer = setTimeout(() => runSearch(q), 260);
+  });
+
+  el.searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { exitSearch(); el.searchInput.blur(); }
+  });
+
+  el.searchClear.addEventListener('click', () => { exitSearch(); el.addInput.focus({ preventScroll: true }); });
+  el.searchExit.addEventListener('click', () => { exitSearch(); el.addInput.focus({ preventScroll: true }); });
+
+  async function runSearch(q) {
+    state.search = { q, active: true, loading: true, results: [] };
+    renderList();
+    try {
+      const data = await api(`/search?q=${encodeURIComponent(q)}`);
+      if (state.search.active && state.search.q === q) {
+        state.search.results = data.todos || [];
+      }
+    } catch (err) {
+      if (err.status === 401) { state.user = null; showAuth(); return; }
+      toast(err.message, 'err');
+    } finally {
+      if (state.search.active && state.search.q === q) {
+        state.search.loading = false;
+        renderList();
+      }
+    }
+  }
+
+  function startSearch(q) {
+    el.searchInput.value = q;
+    el.searchClear.classList.remove('hidden');
+    clearTimeout(searchTimer);
+    runSearch(q);
+    closeSidebar();
+  }
+
+  function exitSearch() {
+    clearTimeout(searchTimer);
+    const had = state.search.active || el.searchInput.value;
+    state.search = { q: '', active: false, loading: false, results: [] };
+    el.searchInput.value = '';
+    el.searchClear.classList.add('hidden');
+    if (had) renderList();
+  }
+
+  /* ------------------------------------------------------------------ *
    * 增 / 改 / 删
    * ------------------------------------------------------------------ */
   el.addForm.addEventListener('submit', async (event) => {
@@ -705,6 +1116,7 @@
     }
 
     el.addHint.hidden = true;
+    if (state.search.active) exitSearch();   // 搜索状态下添加任务，先回到日期视图
     state.busy = true;
     const btn = el.addBtn || el.addForm.querySelector('button[type=submit]');
     if (btn) btn.disabled = true;
@@ -726,6 +1138,7 @@
       state.remaining = data.remaining;
       state.total = data.total;
       renderList();
+      scheduleSidebarRefresh();
     } catch (err) {
       state.todos = state.todos.filter((t) => t.id !== tempId);
       state.total = Math.max(0, state.total - 1);
@@ -754,6 +1167,7 @@
     try {
       const data = await api(`/todos/${encodeURIComponent(todo.id)}`, { method: 'PATCH', body: { done: next } });
       updateCounts(data);
+      scheduleSidebarRefresh();
     } catch (err) {
       todo.done = !next;
       state.todos.sort((a, b) => Number(a.done) - Number(b.done) || a.order - b.order);
@@ -774,6 +1188,7 @@
     try {
       const data = await api(`/todos/${encodeURIComponent(todo.id)}?date=${encodeURIComponent(state.date)}`, { method: 'DELETE' });
       updateCounts(data);
+      scheduleSidebarRefresh();
     } catch (err) {
       state.todos = backup;
       state.remaining = backup.filter((t) => !t.done).length;
@@ -789,6 +1204,7 @@
       try {
         await api('/todos/batch', { method: 'POST', body: { action: 'clear-completed', date: state.date } });
         await refresh();
+        scheduleSidebarRefresh();
         toast('已清除完成的任务', 'ok');
       } catch (err) { toast(err.message, 'err'); }
     });
@@ -798,6 +1214,7 @@
     try {
       const data = await api('/todos/batch', { method: 'POST', body: { action: 'carry-over', date: state.date } });
       await refresh();
+      scheduleSidebarRefresh();
       toast(data.moved ? `已顺延 ${data.moved} 项未完成任务` : '没有需要顺延的任务', data.moved ? 'ok' : '');
     } catch (err) { toast(err.message, 'err'); }
   });
@@ -837,7 +1254,9 @@
   el.userMenu.addEventListener('click', openDrawer);
   el.drawerClose.addEventListener('click', closeDrawer);
   el.drawerMask.addEventListener('click', (e) => { if (e.target === el.drawerMask) closeDrawer(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeDrawer(); closeSidebar(); }
+  });
   el.demoBannerClose.addEventListener('click', () => el.demoBanner.classList.add('hidden'));
 
   /* ------------------------------ 云备份 ------------------------------ */
@@ -975,6 +1394,7 @@
         const data = await api('/backup/restore', { method: 'POST', body: { mode: 'replace' } });
         setStatus(el.backupStatus, `${data.message}（新增 ${data.result?.inserted ?? 0} 条）`, 'ok');
         await refresh();
+        scheduleSidebarRefresh();
       } catch (err) {
         setStatus(el.backupStatus, `恢复失败：${err.message}`, 'err');
       }
@@ -1032,6 +1452,7 @@
 
       const data = await api('/import', { method: 'POST', body: { payload, mode: 'replace' } });
       await refresh();
+      scheduleSidebarRefresh();
       toast(data.message || '导入完成', 'ok');
     } catch (err) {
       toast(`导入失败：${err.message}`, 'err');
@@ -1058,10 +1479,18 @@
    * ------------------------------------------------------------------ */
   el.aboutVersion.textContent = `前端 v${APP_VERSION}`;
 
-  // 快捷键：/ 聚焦输入框
+  // 快捷键：/ 聚焦新增输入框；Ctrl/Cmd+K 聚焦搜索；Esc 关抽屉/侧栏
   document.addEventListener('keydown', (e) => {
-    if (e.key === '/' && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')
-        && !document.activeElement?.isContentEditable) {
+    const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')
+      || document.activeElement?.isContentEditable;
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      el.searchInput.focus();
+      el.searchInput.select();
+      return;
+    }
+    if (e.key === '/' && !inField) {
       e.preventDefault();
       el.addInput.focus();
     }

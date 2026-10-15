@@ -503,7 +503,104 @@ test('无 D1 绑定时给出可操作的错误', async () => {
 });
 
 /* ============================================================
- * 3. 静态资源路由
+ * 3. 搜索与 #标签
+ * ============================================================ */
+
+test('全文搜索按日期倒序返回，并支持 #标签 过滤', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'searcher', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '买牛奶 #购物', date: TODAY });
+  await h.call('POST', '/api/todos', { title: '取快递 #购物', date: '2026-01-05' });
+  await h.call('POST', '/api/todos', { title: '无标签任务', date: TODAY });
+
+  // 关键词命中
+  const byWord = await h.call('GET', `/api/search?q=${encodeURIComponent('快递')}`);
+  assert.equal(byWord.status, 200);
+  assert.equal(byWord.data.todos.length, 1);
+  assert.equal(byWord.data.todos[0].title, '取快递 #购物');
+
+  // #标签命中两条，日期倒序
+  const byTag = await h.call('GET', `/api/search?q=${encodeURIComponent('#购物')}`);
+  assert.deepEqual(byTag.data.todos.map((t) => t.date), [TODAY, '2026-01-05']);
+
+  // LIKE 特殊字符不注入
+  const byPct = await h.call('GET', `/api/search?q=${encodeURIComponent('%')}`);
+  assert.deepEqual(byPct.data.todos, []);
+
+  // 标签统计
+  const tags = await h.call('GET', '/api/tags');
+  assert.deepEqual(tags.data.tags, [{ name: '购物', count: 2 }]);
+
+  // 空查询返回空数组
+  const empty = await h.call('GET', '/api/search?q=');
+  assert.deepEqual(empty.data.todos, []);
+
+  // 多用户隔离：搜索不到别人的数据
+  h.cookie = '';
+  await h.call('POST', '/api/auth/register', { username: 'another', password: 'secret123' });
+  const other = await h.call('GET', `/api/search?q=${encodeURIComponent('牛奶')}`);
+  assert.deepEqual(other.data.todos, []);
+});
+
+/* ============================================================
+ * 4. 数据库未初始化时的诊断
+ * ============================================================ */
+
+/** 造一个「连上了库、但一张表都没有」的环境，复现 D1_ERROR: no such table */
+function makeEmptyDbHarness() {
+  const env = { DB: createD1(':memory:'), APP_NAME: '今日待办', ALLOW_REGISTRATION: 'true' };
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+  return {
+    env,
+    ctx,
+    init: () => env.DB._raw.exec(readFileSync(join(ROOT, 'schema.sql'), 'utf8')),
+    call: (method, path, body) => worker.fetch(
+      new Request(`https://todo.example.com${path}`, {
+        method,
+        headers: body === undefined ? {} : { 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+      env,
+      ctx,
+    ),
+  };
+}
+
+test('未建表时注册：底层 SQLITE_ERROR 被翻译成可照做的提示', async () => {
+  const h = makeEmptyDbHarness();
+  const res = await h.call('POST', '/api/auth/register', { username: 'alice', password: 'secret123' });
+  assert.equal(res.status, 500);
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /schema\.sql/, '应直接告诉用户去执行 schema.sql');
+  assert.doesNotMatch(body.error, /D1_ERROR|SQLITE_ERROR/, '不应把底层报文原样抛给用户');
+});
+
+test('/api/health?check=1 能报出缺失的数据表', async () => {
+  const h = makeEmptyDbHarness();
+  const body = await (await h.call('GET', '/api/health?check=1')).json();
+  assert.equal(body.schema.ok, false);
+  assert.deepEqual(body.schema.missing, ['users', 'sessions', 'todos', 'settings']);
+  assert.match(body.schema.hint, /schema\.sql/);
+});
+
+test('/api/health?check=1 在建表后报告一切正常', async () => {
+  const h = makeEmptyDbHarness();
+  h.init();
+  const body = await (await h.call('GET', '/api/health?check=1')).json();
+  assert.equal(body.schema.ok, true);
+  assert.deepEqual(body.schema.missing, []);
+  assert.deepEqual(body.schema.tables, ['users', 'sessions', 'todos', 'settings']);
+});
+
+test('/api/health 默认不查库，避免健康检查产生额外开销', async () => {
+  const h = makeEmptyDbHarness();
+  const body = await (await h.call('GET', '/api/health')).json();
+  assert.equal(body.schema, undefined);
+});
+
+/* ============================================================
+ * 5. 静态资源路由
  * ============================================================ */
 
 test('非 /api 请求交给静态资源绑定', async () => {

@@ -8,6 +8,8 @@ import { HttpError, nowSeconds } from './auth.js';
 
 const MAX_TITLE = 500;
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** 标题里的 #标签（1-24 个非空白字符，不含 #） */
+const TAG_RE = /#([^\s#]{1,24})/g;
 
 function normalizeTitle(raw) {
   const title = String(raw ?? '').replace(/\s+/g, ' ').trim();
@@ -241,6 +243,44 @@ export async function carryOver(env, userId, { from = null, to }) {
 
   await env.DB.batch(stmts);
   return { moved: rows.length };
+}
+
+/** 全文搜索（LIKE，转义 %/_），按日期倒序，供前端搜索框使用 */
+export async function searchTodos(env, userId, rawQuery, limit = 50) {
+  const q = String(rawQuery ?? '').trim().slice(0, 100);
+  if (!q) return [];
+
+  const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM todos
+      WHERE user_id = ? AND title LIKE ? ESCAPE '\\'
+      ORDER BY todo_date DESC, created_at DESC
+      LIMIT ?`,
+  )
+    .bind(userId, like, Math.max(1, Math.min(100, Number(limit) || 50)))
+    .all();
+  return (results || []).map(toDto);
+}
+
+/** 提取标题里的 #标签 并按出现次数排序（个人应用量级，直接扫标题） */
+export async function listTags(env, userId, limit = 30) {
+  const { results } = await env.DB.prepare('SELECT title FROM todos WHERE user_id = ?')
+    .bind(userId)
+    .all();
+
+  const counter = new Map();
+  for (const row of results || []) {
+    const tags = String(row.title || '').match(TAG_RE);
+    if (!tags) continue;
+    for (const raw of tags) {
+      const name = raw.slice(1);
+      counter.set(name, (counter.get(name) || 0) + 1);
+    }
+  }
+
+  return Array.from(counter, ([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hans-CN'))
+    .slice(0, Math.max(1, Math.min(100, Number(limit) || 30)));
 }
 
 /** 统计每个日期的待办数量，用于日历角标 */
