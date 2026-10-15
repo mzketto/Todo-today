@@ -162,6 +162,45 @@
   const TAG_RE = /#([^\s#]{1,24})/g;
 
   /* ------------------------------------------------------------------ *
+   * 客户端缓存：点击日期/月份先秒开缓存，再后台校新，并预取相邻日期
+   * （stale-while-revalidate，消除「点一下等一下」的网络往返感）
+   * ------------------------------------------------------------------ */
+  const dayCache = new Map();      // date -> { todos, remaining, total }
+  const monthCache = new Map();    // month -> todos[]
+  const prefetching = new Set();   // 正在预取的日期，防重复请求
+  const DAY_CACHE_MAX = 90;
+  const MONTH_CACHE_MAX = 24;
+
+  function cacheSetDay(date, todos, remaining, total) {
+    if (dayCache.size >= DAY_CACHE_MAX) dayCache.delete(dayCache.keys().next().value);
+    dayCache.set(date, { todos, remaining, total });
+  }
+
+  function cacheClearAll() {
+    dayCache.clear();
+    monthCache.clear();
+    prefetching.clear();
+  }
+
+  function prefetchDay(date) {
+    if (dayCache.has(date) || prefetching.has(date)) return;
+    prefetching.add(date);
+    api(`/todos?date=${encodeURIComponent(date)}`)
+      .then((d) => {
+        const todos = d.todos || [];
+        cacheSetDay(date, todos, d.remaining ?? todos.filter((t) => !t.done).length, d.total ?? todos.length);
+      })
+      .catch(() => { /* 预取失败静默忽略 */ })
+      .finally(() => prefetching.delete(date));
+  }
+
+  /** 写操作成功后，把当前单日视图状态同步回缓存 */
+  function syncDayCache() {
+    if (state.month || state.search.active) return;
+    cacheSetDay(state.date, state.todos, state.remaining, state.total);
+  }
+
+  /* ------------------------------------------------------------------ *
    * 工具函数
    * ------------------------------------------------------------------ */
   function pad(n) { return String(n).padStart(2, '0'); }
@@ -550,9 +589,9 @@
     el.mainView.classList.remove('hidden');
     el.userInitial.textContent = (state.user?.username || 'U').slice(0, 1).toUpperCase();
     el.accountName.textContent = state.user?.username || '-';
-    await refresh();
-    loadSidebarData();
-    await loadBackupConfig();
+    await refresh();          // 主列表优先渲染
+    loadSidebarData();        // 侧栏与备份配置并行加载，不阻塞首屏
+    loadBackupConfig();
     el.addInput.focus({ preventScroll: true });
     // ?panel=settings 用于直接打开设置抽屉（演示/截图用）
     if (URL_PARAMS.get('panel') === 'settings') openDrawer();
@@ -620,6 +659,7 @@
     try { await api('/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
     state.user = null;
     state.todos = [];
+    cacheClearAll();
     closeDrawer();
     showAuth();
     toast('已退出登录');
@@ -725,25 +765,54 @@
     el.carryoverBtn.style.visibility = 'hidden';
   }
 
+  /** 应用整月数据到视图（refreshMonth 专用） */
+  function applyMonthData(month, todos) {
+    if (state.month !== month) return;   // 用户已切走
+    state.monthTodos = todos;
+    const undone = todos.filter((t) => !t.done).length;
+    state.remaining = undone;
+    state.total = todos.length;
+    el.remainingCount.textContent = String(undone);
+    el.remainingLabel.textContent = undone === 0
+      ? (todos.length ? '本月全部完成 🎉' : '项待完成')
+      : '项待完成';
+    el.clearDoneBtn.disabled = !todos.some((t) => t.done);
+    renderList();
+  }
+
   async function refreshMonth() {
     const month = state.month;
     if (!month) return;
+
+    // 1) 有缓存：立即渲染
+    const cached = monthCache.get(month);
+    if (cached && state.month === month) applyMonthData(month, cached);
+
+    // 2) 后台校新（数据没变就不重绘）
     try {
       const data = await api(`/todos?month=${encodeURIComponent(month)}`);
       if (state.month !== month) return;   // 用户已切走
-      state.monthTodos = data.todos || [];
-      const undone = state.monthTodos.filter((t) => !t.done).length;
-      state.remaining = undone;
-      state.total = state.monthTodos.length;
-      el.remainingCount.textContent = String(undone);
-      el.remainingLabel.textContent = undone === 0
-        ? (state.monthTodos.length ? '本月全部完成 🎉' : '项待完成')
-        : '项待完成';
-      el.clearDoneBtn.disabled = !state.monthTodos.some((t) => t.done);
-      renderList();
+      const todos = data.todos || [];
+      const unchanged = cached && JSON.stringify(cached) === JSON.stringify(todos);
+      if (unchanged) return;
+      if (monthCache.size >= MONTH_CACHE_MAX) monthCache.delete(monthCache.keys().next().value);
+      monthCache.set(month, todos);
+      applyMonthData(month, todos);
+
+      // 3) 整月数据顺手灌进单日缓存：点该月任何一天都秒开
+      const byDate = new Map();
+      for (const t of todos) {
+        if (!byDate.has(t.date)) byDate.set(t.date, []);
+        byDate.get(t.date).push(t);
+      }
+      for (const [d, list] of byDate) {
+        if (!dayCache.has(d)) {
+          cacheSetDay(d, list, list.filter((t) => !t.done).length, list.length);
+        }
+      }
     } catch (err) {
       if (err.status === 401) { state.user = null; showAuth(); return; }
-      toast(err.message, 'err');
+      if (!cached) toast(err.message, 'err');
     }
   }
 
@@ -978,6 +1047,7 @@
           const data = await api(`/todos/${encodeURIComponent(todo.id)}`, { method: 'PATCH', body: { title: next } });
           Object.assign(todo, { title: next });
           updateCounts(data);
+          syncDayCache();
           scheduleSidebarRefresh();
         } catch (err) {
           toast(err.message, 'err');
@@ -1015,15 +1085,42 @@
   }
 
   async function refresh() {
-    try {
-      const data = await api(`/todos?date=${encodeURIComponent(state.date)}`);
-      state.todos = data.todos || [];
-      state.remaining = data.remaining ?? state.todos.filter((t) => !t.done).length;
-      state.total = data.total ?? state.todos.length;
+    const date = state.date;
+    const cached = dayCache.get(date);
+
+    // 1) 有缓存：立即渲染，用户零等待
+    if (cached && state.date === date && !state.month && !state.search.active) {
+      state.todos = cached.todos;
+      state.remaining = cached.remaining;
+      state.total = cached.total;
       renderList();
+    }
+
+    // 2) 后台请求最新数据（有缓存时数据没变就不重绘，避免闪烁）
+    try {
+      const data = await api(`/todos?date=${encodeURIComponent(date)}`);
+      const todos = data.todos || [];
+      const remaining = data.remaining ?? todos.filter((t) => !t.done).length;
+      const total = data.total ?? todos.length;
+      const unchanged = cached
+        && cached.remaining === remaining
+        && cached.total === total
+        && JSON.stringify(cached.todos) === JSON.stringify(todos);
+      if (!unchanged) cacheSetDay(date, todos, remaining, total);
+
+      if (state.date !== date || state.month || state.search.active) return;   // 用户已切走
+      if (unchanged) return;                                                   // 画面已是最新
+      state.todos = todos;
+      state.remaining = remaining;
+      state.total = total;
+      renderList();
+
+      // 3) 顺手预取前一天/后一天，左右切换日期时秒开
+      prefetchDay(shiftDate(date, -1));
+      prefetchDay(shiftDate(date, 1));
     } catch (err) {
       if (err.status === 401) { state.user = null; showAuth(); return; }
-      toast(err.message, 'err');
+      if (!cached) toast(err.message, 'err');   // 已有缓存内容在展示时静默
     }
   }
 
@@ -1305,6 +1402,7 @@
       state.remaining = data.remaining;
       state.total = data.total;
       renderList();
+      syncDayCache();
       scheduleSidebarRefresh();
     } catch (err) {
       state.todos = state.todos.filter((t) => t.id !== tempId);
@@ -1334,7 +1432,7 @@
     try {
       const data = await api(`/todos/${encodeURIComponent(todo.id)}`, { method: 'PATCH', body: { done: next } });
       if (state.month) { await refreshMonth(); }
-      else { updateCounts(data); }
+      else { updateCounts(data); syncDayCache(); }
       scheduleSidebarRefresh();
     } catch (err) {
       todo.done = !next;
@@ -1362,7 +1460,7 @@
     try {
       const data = await api(`/todos/${encodeURIComponent(todo.id)}?date=${encodeURIComponent(state.date)}`, { method: 'DELETE' });
       if (state.month) { await refreshMonth(); }
-      else { updateCounts(data); }
+      else { updateCounts(data); syncDayCache(); }
       scheduleSidebarRefresh();
     } catch (err) {
       if (state.month) {
@@ -1395,6 +1493,7 @@
           toast(`已清除本月 ${data.removed || 0} 项已完成任务`, 'ok');
         } else {
           await refresh();
+          syncDayCache();
           toast('已清除完成的任务', 'ok');
         }
       } catch (err) { toast(err.message, 'err'); }
@@ -1404,6 +1503,7 @@
   el.carryoverBtn.addEventListener('click', async () => {
     try {
       const data = await api('/todos/batch', { method: 'POST', body: { action: 'carry-over', date: state.date } });
+      cacheClearAll();   // 顺延会改动多个日期的数据，直接清空缓存最稳妥
       await refresh();
       scheduleSidebarRefresh();
       toast(data.moved ? `已顺延 ${data.moved} 项未完成任务` : '没有需要顺延的任务', data.moved ? 'ok' : '');
@@ -1699,10 +1799,11 @@
     armedClick(el.backupRestore, '确认覆盖？', async () => {
       setStatus(el.backupStatus, '正在从云端恢复…', 'busy');
       try {
-        const data = await api('/backup/restore', { method: 'POST', body: { mode: 'replace' } });
-        setStatus(el.backupStatus, `${data.message}（新增 ${data.result?.inserted ?? 0} 条）`, 'ok');
-        await refresh();
-        scheduleSidebarRefresh();
+      const data = await api('/backup/restore', { method: 'POST', body: { mode: 'replace' } });
+      setStatus(el.backupStatus, `${data.message}（新增 ${data.result?.inserted ?? 0} 条）`, 'ok');
+      cacheClearAll();   // 云端数据整体替换，缓存全部失效
+      await refresh();
+      scheduleSidebarRefresh();
       } catch (err) {
         setStatus(el.backupStatus, `恢复失败：${err.message}`, 'err');
       }
@@ -1753,12 +1854,14 @@
           date: t.date || todayStr(), order: i, createdAt: Math.floor(Date.now() / 1000),
         })).filter((t) => t.title);
         demoWrite(db);
+        cacheClearAll();
         await refresh();
         toast(`导入完成：${db.todos.length} 条`, 'ok');
         return;
       }
 
       const data = await api('/import', { method: 'POST', body: { payload, mode: 'replace' } });
+      cacheClearAll();   // 导入整体替换数据，缓存全部失效
       await refresh();
       scheduleSidebarRefresh();
       toast(data.message || '导入完成', 'ok');
