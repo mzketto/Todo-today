@@ -116,6 +116,15 @@
     backupRun: $('backup-run'),
     backupRestore: $('backup-restore'),
     backupStatus: $('backup-status'),
+    backupStamp: $('backup-stamp'),
+    backupStampHint: $('backup-stamp-hint'),
+    backupInterval: $('backup-interval'),
+    backupIntervalField: $('backup-interval-field'),
+    backupIntervalHint: $('backup-interval-hint'),
+    backupScheduled: $('backup-scheduled'),
+    backupPeriod: $('backup-period'),
+    backupPeriodField: $('backup-period-field'),
+    backupCronHint: $('backup-cron-hint'),
     lastBackupLine: $('last-backup-line'),
 
     exportBtn: $('export-btn'),
@@ -147,6 +156,7 @@
     tags: [],             // [{ name, count }]
     cal: (() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; })(),
     search: { q: '', active: false, loading: false, results: [] },
+    cron: null,           // 定时任务（Cron）心跳状态
   };
 
   const TAG_RE = /#([^\s#]{1,24})/g;
@@ -420,12 +430,15 @@
         return {
           ok: true,
           config: db.backup || {
-            provider: 'none', enabled: false, auto: false, file: 'todo-today.backup.json',
+            provider: 'none', enabled: false, auto: false, stamp: true,
+            intervalMin: 1, scheduled: false, scheduleMin: 60, tz: '',
+            file: 'todo-today.backup.json',
             hasR2Binding: false,
             s3: { endpoint: '', region: 'auto', bucket: '', accessKeyId: '', hasSecretKey: false, prefix: '', pathStyle: false },
             webdav: { url: '', username: '', hasPassword: false, file: '' },
           },
           lastBackup: null,
+          cron: { lastRun: null, healthy: false, intervalSeconds: 300 },
         };
       }
       if (seg[1] === 'config' && method === 'PUT') {
@@ -1446,16 +1459,120 @@
     const on = el.backupEnabled.checked && provider !== 'none';
     el.backupEnabled.disabled = provider === 'none';
     el.backupAuto.disabled = !on;
+    el.backupScheduled.disabled = !on;
     [el.backupTest, el.backupRun, el.backupRestore].forEach((b) => { b.disabled = provider === 'none'; });
-    if (!on) el.backupAuto.checked = false;
+    if (!on) { el.backupAuto.checked = false; el.backupScheduled.checked = false; }
+
+    // 频率相关控件只在对应开关打开时出现
+    el.backupIntervalField.classList.toggle('hidden', !(on && el.backupAuto.checked));
+    el.backupPeriodField.classList.toggle('hidden', !(on && el.backupScheduled.checked));
+
+    updateStampHint();
+    updateFrequencyHints();
+  }
+
+  /** 安全地给 select 赋值：配置里的值不在选项列表里时临时补一个选项 */
+  function setSelectValue(select, value) {
+    const v = String(value);
+    if (!Array.from(select.options).some((o) => o.value === v)) {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = `${humanMinutes(v)}（自定义）`;
+      select.appendChild(opt);
+    }
+    select.value = v;
+  }
+
+  /** 把「分钟」翻译成人话 */
+  function humanMinutes(min) {
+    const n = Number(min);
+    if (n === 0) return '不限制';
+    if (n < 60) return `${n} 分钟`;
+    if (n === 60) return '1 小时';
+    if (n < 1440) return `${n / 60} 小时`;
+    if (n === 1440) return '24 小时';
+    return `${Math.round(n / 1440)} 天`;
+  }
+
+  /** 频率 / 定时备份的说明 + Cron 是否真的在跑的诊断 */
+  function updateFrequencyHints() {
+    const every = humanMinutes(el.backupInterval.value);
+    el.backupIntervalHint.textContent = Number(el.backupInterval.value) === 0
+      ? '每次数据变更都会备份一次，历史文件增长最快。'
+      : `距上次备份不足 ${every}时不会重复备份（每改一次任务都会检查）。`;
+
+    if (!el.backupScheduled.checked) {
+      el.backupCronHint.textContent = '打开后由 Cloudflare 定时触发（每 5 分钟检查一次），不需要你打开页面。';
+      return;
+    }
+    const period = humanMinutes(el.backupPeriod.value);
+    const status = state.cron || {};
+    let text = `云端每 5 分钟检查一次，到点就备份，约每 ${period}一次。`;
+    if (status.lastRun) {
+      const ago = Math.max(0, Math.round(Date.now() / 1000 - status.lastRun));
+      const agoText = ago < 90 ? `${ago} 秒前` : `${Math.round(ago / 60)} 分钟前`;
+      text += status.healthy
+        ? ` 定时任务运行正常（上次检查 ${agoText}）。`
+        : ` ⚠️ 上次检查是 ${agoText}，定时任务可能没在跑：需在 Worker 的 Triggers 里添加 Cron「*/5 * * * *」。`;
+    } else {
+      text += ' ⚠️ 还没收到过定时任务的心跳：请确认已在 Worker 的 Triggers → Cron Triggers 里添加「*/5 * * * *」。';
+    }
+    el.backupCronHint.textContent = text;
+  }
+
+  /** 本地时间的时间戳示例，与后端 fileStamp 格式一致：YYYYMMDD-HHmmss */
+  function localStamp(d = new Date()) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  }
+
+  /** 与后端 stampKey 一致的命名规则：时间戳插在扩展名之前 */
+  function stampName(base, stamp) {
+    const name = String(base || 'todo-today.backup.json');
+    const dot = name.lastIndexOf('.');
+    return dot > 0 ? `${name.slice(0, dot)}.${stamp}${name.slice(dot)}` : `${name}.${stamp}`;
+  }
+
+  /** 当前配置下实际会写入的固定文件名（与后端 objectKeyOf 对应） */
+  function currentBackupBase() {
+    const provider = el.backupProvider.value;
+    if (provider === 'r2') return el.r2Key.value.trim() || 'todo-today.backup.json';
+    if (provider === 'webdav') return el.davFile.value.trim() || 'todo-today.backup.json';
+    const prefix = el.s3Prefix.value.trim().replace(/^\/+/, '');
+    return `${prefix}${el.s3File.value.trim() || 'todo-today.backup.json'}`;
+  }
+
+  function updateStampHint() {
+    const provider = el.backupProvider.value;
+    if (provider === 'none') {
+      el.backupStampHint.textContent = '选择备份方式后，这里会显示实际写入云端的文件名。';
+      return;
+    }
+    const base = currentBackupBase();
+    if (!el.backupStamp) return;
+    if (!el.backupStamp.checked) {
+      el.backupStampHint.textContent = `每次备份都会覆盖同一个文件：${base}`;
+      return;
+    }
+    el.backupStampHint.textContent =
+      `每次备份写入 ${stampName(base, localStamp())}，并同时刷新固定名快照 ${base}（「从云端恢复」读的是这份）。`;
   }
 
   el.backupProvider.addEventListener('change', syncProviderPanels);
   el.backupEnabled.addEventListener('change', syncProviderPanels);
+  el.backupStamp.addEventListener('change', updateStampHint);
+  el.backupAuto.addEventListener('change', syncProviderPanels);
+  el.backupScheduled.addEventListener('change', syncProviderPanels);
+  el.backupInterval.addEventListener('change', updateFrequencyHints);
+  el.backupPeriod.addEventListener('change', updateFrequencyHints);
+  [el.r2Key, el.s3File, el.s3Prefix, el.davFile].forEach((input) => {
+    input.addEventListener('input', updateStampHint);
+  });
 
   async function loadBackupConfig() {
     try {
       const data = await api('/backup/config');
+      state.cron = data.cron || null;
       fillBackupForm(data.config || {});
       if (data.lastBackup) {
         el.lastBackupLine.textContent = `上次备份：${new Date(data.lastBackup * 1000).toLocaleString()}`;
@@ -1471,6 +1588,10 @@
     el.backupProvider.value = config.provider || 'none';
     el.backupEnabled.checked = !!config.enabled;
     el.backupAuto.checked = !!config.auto;
+    el.backupStamp.checked = config.stamp !== false;   // 默认开启
+    setSelectValue(el.backupInterval, config.intervalMin ?? 1);
+    el.backupScheduled.checked = !!config.scheduled;
+    setSelectValue(el.backupPeriod, config.scheduleMin ?? 60);
 
     el.r2Key.value = config.r2?.key || '';
     if (config.hasR2Binding === false) {
@@ -1508,6 +1629,12 @@
       provider,
       enabled: el.backupEnabled.checked && provider !== 'none',
       auto: el.backupAuto.checked && el.backupEnabled.checked && provider !== 'none',
+      intervalMin: Number(el.backupInterval.value) || 0,
+      scheduled: el.backupScheduled.checked && el.backupEnabled.checked && provider !== 'none',
+      scheduleMin: Number(el.backupPeriod.value) || 60,
+      stamp: el.backupStamp.checked,
+      // 前端直接把浏览器时区报给后端，定时备份拼文件名时用
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
       file: provider === 'webdav'
         ? (el.davFile.value.trim() || 'todo-today.backup.json')
         : (el.s3File.value.trim() || 'todo-today.backup.json'),
@@ -1557,7 +1684,10 @@
     try {
       const data = await api('/backup/run', { method: 'POST' });
       const r = data.result || {};
-      setStatus(el.backupStatus, `备份成功：共 ${r.total ?? '-'} 条任务，${formatBytes(r.size)}`, 'ok');
+      const detail = r.key && r.key !== r.latestKey
+        ? `共 ${r.total ?? '-'} 条任务，${formatBytes(r.size)} → ${r.key}`
+        : `共 ${r.total ?? '-'} 条任务，${formatBytes(r.size)} → ${r.key || r.latestKey || ''}`;
+      setStatus(el.backupStatus, `备份成功：${detail}`, 'ok');
       el.lastBackupLine.textContent = `上次备份：${new Date().toLocaleString()}`;
       toast('已备份到云端', 'ok');
     } catch (err) {

@@ -1001,7 +1001,12 @@ body.side-open .sidebar {
   }
   .side-mask { display: none !important; }
   .side-toggle { display: none; }
-  .content { padding: 0 28px calc(18px + var(--safe-bottom)); }
+  /* grid 项上的 margin:auto 会放弃拉伸、按 fit-content 收缩，必须显式给宽 */
+  .content {
+    width: 100%;
+    max-width: 760px;
+    padding: 0 28px calc(18px + var(--safe-bottom));
+  }
   .topbar { padding-top: 30px; }
   .topbar-title { font-size: 28px; }
 }

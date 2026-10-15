@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import worker from '../src/index.js';
-import { signRequest } from '../src/lib/backup.js';
+import { signRequest, fileStamp, stampKey } from '../src/lib/backup.js';
 import { createD1 } from './d1-shim.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -388,6 +388,7 @@ test('备份配置读写与脱敏', async () => {
   assert.equal(initial.status, 200);
   assert.equal(initial.data.config.provider, 'none');
   assert.equal(initial.data.config.s3.secretAccessKey, '');
+  assert.equal(initial.data.config.stamp, true, '文件名时间戳默认开启');
 
   const saved = await h.call('PUT', '/api/backup/config', {
     provider: 's3',
@@ -487,6 +488,249 @@ test('R2 绑定可用时能完成备份与恢复', async () => {
   const test2 = await h.call('POST', '/api/backup/test', { provider: 'r2', enabled: true });
   assert.equal(test2.status, 200);
   assert.equal(test2.data.info.exists, true);
+});
+
+test('备份文件名时间戳：按指定时区生成，非法时区退回 UTC', () => {
+  const at = new Date('2026-10-15T13:57:30Z');
+  assert.equal(fileStamp(at, 'UTC'), '20261015-135730');
+  assert.equal(fileStamp(at, 'Asia/Shanghai'), '20261015-215730', '北京时间应为 21:57:30');
+  assert.equal(fileStamp(at, 'Not/AZone'), '20261015-135730', '非法时区不能导致备份失败');
+  assert.equal(fileStamp(at, undefined), '20261015-135730');
+  assert.match(fileStamp(new Date(), 'UTC'), /^\d{8}-\d{6}$/);
+});
+
+test('时间戳插在扩展名之前，目录与前缀保持不变', () => {
+  assert.equal(stampKey('todo-today.backup.json', 'X'), 'todo-today.backup.X.json');
+  assert.equal(stampKey('todo/todo-today.backup.json', 'X'), 'todo/todo-today.backup.X.json');
+  assert.equal(stampKey('dump', 'X'), 'dump.X');
+  assert.equal(stampKey('', 'X'), 'todo-today.backup.X.json');
+});
+
+test('开启时间戳后：写入带时间戳的文件，同时刷新固定名快照', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) { store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  await h.call('POST', '/api/auth/register', { username: 'user15', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '带时间戳', date: TODAY });
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, auto: false, stamp: true });
+
+  const run = await h.call('POST', '/api/backup/run');
+  assert.equal(run.status, 200);
+  assert.equal(run.data.result.stamped, true);
+  assert.match(run.data.result.key, /^todo-today\.backup\.\d{8}-\d{6}\.json$/, '返回的文件名应带时间戳');
+  assert.equal(run.data.result.latestKey, 'todo-today.backup.json');
+  assert.ok(store.has('todo-today.backup.json'), '固定名快照必须存在');
+  assert.ok(store.has(run.data.result.key), '时间戳文件必须存在');
+  assert.equal(store.size, 2, '一次备份写两份：历史版本 + 最新快照');
+  assert.equal(store.get(run.data.result.key), store.get('todo-today.backup.json'), '两份内容一致');
+
+  // 换了时间戳文件名，恢复依旧读固定名快照
+  h.db._raw.exec('DELETE FROM todos');
+  const restore = await h.call('POST', '/api/backup/restore', { mode: 'replace' });
+  assert.equal(restore.status, 200);
+  assert.equal(restore.data.result.key, 'todo-today.backup.json');
+  assert.equal(restore.data.result.inserted, 1);
+});
+
+test('关闭时间戳后：只写固定名，不产生历史文件', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) { store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  await h.call('POST', '/api/auth/register', { username: 'user16', password: 'secret123' });
+  const cfg = await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: false, stamp: false,
+  });
+  assert.equal(cfg.data.config.stamp, false);
+
+  const run = await h.call('POST', '/api/backup/run');
+  assert.equal(run.status, 200);
+  assert.equal(run.data.result.stamped, false);
+  assert.equal(run.data.result.key, 'todo-today.backup.json');
+  assert.equal(store.size, 1);
+  assert.ok(store.has('todo-today.backup.json'));
+});
+
+test('未提交 stamp 字段时沿用旧配置（留空不意外关闭）', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user17', password: 'secret123' });
+
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, stamp: false });
+  const again = await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true });
+  assert.equal(again.data.config.stamp, false, '未提交 stamp 时应保留 false');
+
+  const back = await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, stamp: true });
+  assert.equal(back.data.config.stamp, true);
+});
+
+test('备份频率可自行设置：间隔与定时周期都会落库并回显', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user18', password: 'secret123' });
+
+  const initial = await h.call('GET', '/api/backup/config');
+  assert.equal(initial.data.config.intervalMin, 1, '默认最短间隔 1 分钟');
+  assert.equal(initial.data.config.scheduled, false, '默认不开定时备份');
+  assert.equal(initial.data.config.scheduleMin, 60);
+  assert.equal(initial.data.cron.healthy, false, '没跑过 Cron 时 healthy 应为 false');
+
+  const saved = await h.call('PUT', '/api/backup/config', {
+    provider: 's3', enabled: true, auto: true, scheduled: true,
+    intervalMin: 30, scheduleMin: 360,
+    s3: { endpoint: 'https://e.x', bucket: 'b', accessKeyId: 'A', secretAccessKey: 'S' },
+  });
+  assert.equal(saved.data.config.intervalMin, 30);
+  assert.equal(saved.data.config.scheduled, true);
+  assert.equal(saved.data.config.scheduleMin, 360);
+
+  // 越界/非法值会被夹紧或回退，不能写出一个荒谬的频率
+  const wild = await h.call('PUT', '/api/backup/config', {
+    provider: 's3', enabled: true, auto: true, scheduled: true,
+    intervalMin: -5, scheduleMin: 'abc',
+    s3: { endpoint: 'https://e.x', bucket: 'b', accessKeyId: 'A', secretAccessKey: 'S' },
+  });
+  assert.equal(wild.data.config.intervalMin, 0, '负数夹到 0（不限流）');
+  assert.equal(wild.data.config.scheduleMin, 360, '非数字回退到上一次的值');
+
+  const tiny = await h.call('PUT', '/api/backup/config', {
+    provider: 's3', enabled: true, scheduled: true, scheduleMin: 1,
+    s3: { endpoint: 'https://e.x', bucket: 'b', accessKeyId: 'A', secretAccessKey: 'S' },
+  });
+  assert.equal(tiny.data.config.scheduleMin, 5, '定时周期不得小于 Cron 的 5 分钟');
+});
+
+test('变更触发的自动备份按自定义间隔节流', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  let puts = 0;
+  h.env.BACKUPS = {
+    async put(key, value) { puts += 1; store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  await h.call('POST', '/api/auth/register', { username: 'user19', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: true, stamp: false, intervalMin: 60,
+  });
+
+  await h.call('POST', '/api/todos', { title: '第一次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 1, '首次变更应触发备份');
+
+  await h.call('POST', '/api/todos', { title: '第二次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 1, '60 分钟间隔内不应重复备份');
+
+  // 把「上次备份」拨回 1 小时前 -> 间隔已过，下一次变更应再备份
+  h.db._raw.prepare("UPDATE settings SET last_backup = ? WHERE user_id = (SELECT id FROM users WHERE username = 'user19')")
+    .run(Math.floor(Date.now() / 1000) - 3600);
+  await h.call('POST', '/api/todos', { title: '第三次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 2, '间隔已过应再次备份');
+
+  // 改成「不限流」-> 紧接着的变更立刻再备份一次
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: true, stamp: false, intervalMin: 0,
+  });
+  h.db._raw.prepare("UPDATE settings SET last_backup = ? WHERE user_id = (SELECT id FROM users WHERE username = 'user19')")
+    .run(Math.floor(Date.now() / 1000) - 3600);
+  await h.call('POST', '/api/todos', { title: '第四次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 3);
+});
+
+test('定时备份：Cron 只给到点的用户备份，并写心跳', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) { store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  // A：开了定时备份；B：只开了变更触发
+  await h.call('POST', '/api/auth/register', { username: 'cronA', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: 'A 的任务', date: TODAY });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: false, scheduled: true, scheduleMin: 60, stamp: false,
+  });
+  await h.call('POST', '/api/auth/logout');
+  await h.call('POST', '/api/auth/register', { username: 'cronB', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, auto: true, stamp: false });
+
+  store.clear();
+  const now = Math.floor(Date.now() / 1000);
+  const report = await worker.scheduled({ scheduledTime: now * 1000 }, h.env, { waitUntil: (p) => p });
+  assert.equal(report.due, 1, '只有到点的用户会被备份');
+  assert.equal(report.ok, 1);
+  assert.equal(store.size, 1);
+
+  // 心跳应落在 __cron__ 这一行，且不影响用户配置
+  const beat = h.db._raw.prepare('SELECT backup_json, last_backup FROM settings WHERE user_id = ?').get('__cron__');
+  assert.equal(beat.backup_json, null);
+  assert.ok(beat.last_backup >= now, '心跳时间应被记录');
+
+  const status = await h.call('GET', '/api/backup/config');
+  assert.equal(status.data.cron.healthy, true, '刚跑过 Cron，应判定为正常');
+
+  // 同一个周期内再跑一次：不该重复备份
+  const again = await worker.scheduled({ scheduledTime: (now + 60) * 1000 }, h.env, { waitUntil: (p) => p });
+  assert.equal(again.due, 0, '未到周期不应重复备份');
+  assert.equal(store.size, 1);
+
+  // 周期到了（60 分钟）应再备份一次
+  const later = await worker.scheduled({ scheduledTime: (now + 3600) * 1000 }, h.env, { waitUntil: (p) => p });
+  assert.equal(later.due, 1);
+  assert.equal(later.ok, 1);
+});
+
+test('定时备份：某用户上传失败或配置损坏都不影响其它用户', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) {
+      if (key.includes('bad')) throw new Error('模拟上传失败');
+      store.set(key, value);
+    },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  // C：上传会失败；D：正常；E：配置 JSON 损坏
+  await h.call('POST', '/api/auth/register', { username: 'cronC', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, scheduled: true, scheduleMin: 60, stamp: false,
+    r2: { key: 'bad.json' },
+  });
+  await h.call('POST', '/api/auth/register', { username: 'cronD', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, scheduled: true, scheduleMin: 60, stamp: false,
+    r2: { key: 'good.json' },
+  });
+  await h.call('POST', '/api/auth/register', { username: 'cronE', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, scheduled: true, scheduleMin: 60, stamp: false,
+  });
+  h.db._raw.prepare('UPDATE settings SET backup_json = ? WHERE user_id = (SELECT id FROM users WHERE username = ?)')
+    .run('{坏掉的JSON', 'cronE');
+
+  const report = await worker.scheduled({ scheduledTime: Date.now() }, h.env, { waitUntil: (p) => p });
+  assert.equal(report.checked, 3);
+  assert.equal(report.due, 2, '配置损坏的用户被跳过，不算入待备份');
+  assert.equal(report.ok, 1, '好的那个用户照样备份成功');
+  assert.equal(report.failed.length, 1);
+  assert.match(report.failed[0].error, /模拟上传失败/);
+  assert.equal(store.size, 1);
+  assert.ok(store.has('good.json'));
 });
 
 test('未知接口返回 404', async () => {

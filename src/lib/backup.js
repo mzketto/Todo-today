@@ -9,6 +9,11 @@
  * 密钥读取优先级：页面配置 > Worker 环境变量（密钥/变量）
  *   BACKUP_S3_SECRET_KEY       S3 私钥
  *   BACKUP_WEBDAV_PASSWORD     WebDAV 密码
+ *
+ * 文件名：默认在扩展名前附加时间戳保留历史版本，例如
+ *   todo-today.backup.json  →  todo-today.backup.20261015-215730.json
+ * 同时始终刷新一份固定名的最新快照（todo-today.backup.json），
+ * 「从云端恢复 / 测试连接」读的就是它，因此无论开不开时间戳都不受影响。
  */
 
 import { sha256Hex, hmacSha256, toHex, basicAuthHeader } from './crypto.js';
@@ -21,7 +26,12 @@ export const DEFAULT_FILE = 'todo-today.backup.json';
 const EMPTY_CONFIG = {
   provider: 'none',   // none | r2 | s3 | webdav
   enabled: false,
-  auto: false,        // 数据变更后自动备份（带节流）
+  auto: false,        // 数据变更后自动备份
+  intervalMin: 1,     // 变更触发备份的最短间隔（分钟），0 = 不限流
+  scheduled: false,   // 定时备份（Cron 触发，不依赖操作）
+  scheduleMin: 60,    // 定时备份周期（分钟）
+  stamp: true,        // 文件名附加时间戳，保留历史版本
+  tz: '',             // 用户时区（用于文件名时间戳，Cron 触发时没有请求上下文）
   file: DEFAULT_FILE,
   r2: { key: '' },
   s3: {
@@ -36,12 +46,74 @@ const EMPTY_CONFIG = {
   webdav: { url: '', username: '', password: '', file: '' },
 };
 
-export const AUTO_BACKUP_THROTTLE_SECONDS = 60;
+/** 变更触发备份的默认最短间隔（分钟） */
+export const DEFAULT_INTERVAL_MIN = 1;
+/** 定时备份的最小周期（分钟）——Cron 每 5 分钟唤醒一次 */
+export const MIN_SCHEDULE_MIN = 5;
+/** Cron 心跳超过这个秒数没更新，就认为定时任务没跑起来 */
+export const CRON_HEALTHY_SECONDS = 900;
+const MAX_INTERVAL_MIN = 10080;          // 最多 7 天
+const CRON_HEARTBEAT_ROW = '__cron__';   // 借用 settings 表存 Cron 心跳，避免改表结构
+
+/* ============================== 文件名 / 时间戳 ============================== */
+
+function tzParts(date, timeZone) {
+  const options = {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  };
+  const formatter = (tz) => new Intl.DateTimeFormat('en-US', { ...options, timeZone: tz });
+  try {
+    return formatter(timeZone || 'UTC').formatToParts(date);
+  } catch {
+    // 时区字符串非法（或运行环境不支持）→ 退回 UTC，绝不因此让备份失败
+    return formatter('UTC').formatToParts(date);
+  }
+}
+
+/**
+ * 生成文件名用的时间戳：YYYYMMDD-HHmmss
+ * 默认按 UTC；传入 IANA 时区（如 request.cf.timezone = 'Asia/Shanghai'）则按该时区，
+ * 这样文件名里的时间与用户本地时钟一致。
+ */
+export function fileStamp(date = new Date(), timeZone = 'UTC') {
+  const parts = tzParts(date, timeZone);
+  const get = (type) => parts.find((p) => p.type === type)?.value || '';
+  return `${get('year')}${get('month')}${get('day')}-${get('hour')}${get('minute')}${get('second')}`;
+}
+
+/**
+ * 把时间戳插到文件名的扩展名之前（对象键里的目录、前缀保持不变）：
+ *   todo-today.backup.json        → todo-today.backup.20261015-215730.json
+ *   todo/todo-today.backup.json   → todo/todo-today.backup.20261015-215730.json
+ *   dump                          → dump.20261015-215730
+ */
+export function stampKey(key, stamp) {
+  const s = String(key || DEFAULT_FILE);
+  const slash = s.lastIndexOf('/');
+  const dir = slash >= 0 ? s.slice(0, slash + 1) : '';
+  const name = (slash >= 0 ? s.slice(slash + 1) : s) || DEFAULT_FILE;
+  const dot = name.lastIndexOf('.');
+  if (dot > 0) return `${dir}${name.slice(0, dot)}.${stamp}${name.slice(dot)}`;
+  return `${dir}${name}.${stamp}`;
+}
 
 /* ============================== 配置读写 ============================== */
 
 function pickString(value, fallback = '') {
   return typeof value === 'string' ? value.trim() : fallback;
+}
+
+/** 把「分钟数」输入夹到合法范围；非数字则回退到兜底值 */
+function pickMinutes(value, fallback, min) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), MAX_INTERVAL_MIN);
 }
 
 /** 归一化 + 合并旧的加密字段（前端留空 = 不修改） */
@@ -61,6 +133,13 @@ export function normalizeConfig(input = {}, previous = {}) {
     provider,
     enabled: !!input.enabled && provider !== 'none',
     auto: !!input.auto,
+    // 备份频率：变更触发的最短间隔 / 定时备份周期（都可自行设置）
+    intervalMin: pickMinutes(input.intervalMin, previous.intervalMin ?? DEFAULT_INTERVAL_MIN, 0),
+    scheduled: !!input.scheduled,
+    scheduleMin: pickMinutes(input.scheduleMin, previous.scheduleMin ?? 60, MIN_SCHEDULE_MIN),
+    // 默认开启：未显式关闭就附加时间戳
+    stamp: input.stamp === undefined ? previous.stamp !== false : !!input.stamp,
+    tz: pickString(input.tz) || pickString(previous.tz) || '',
     file: pickString(input.file) || DEFAULT_FILE,
     r2: {
       key: pickString(input.r2?.key) || prevR2.key || '',
@@ -92,6 +171,11 @@ export function maskConfig(config = EMPTY_CONFIG, env = {}) {
     provider: config.provider || 'none',
     enabled: !!config.enabled,
     auto: !!config.auto,
+    intervalMin: config.intervalMin ?? DEFAULT_INTERVAL_MIN,
+    scheduled: !!config.scheduled,
+    scheduleMin: config.scheduleMin ?? 60,
+    stamp: config.stamp !== false,
+    tz: config.tz || '',
     file: config.file || DEFAULT_FILE,
     r2: { key: config.r2?.key || '' },
     hasR2Binding: !!env.BACKUPS,
@@ -552,13 +636,31 @@ async function safeText(res) {
 
 /* ============================== 对外入口 ============================== */
 
-export async function runBackup(env, user, config) {
+export async function runBackup(env, user, config, { timeZone = 'UTC', now = new Date() } = {}) {
   if (!config || config.provider === 'none') throw new HttpError('未配置备份方式');
 
-  const key = objectKeyOf(config, config.provider);
+  const latestKey = objectKeyOf(config, config.provider);
   const payload = await buildPayload(env, user);
   const text = JSON.stringify(payload, null, 2);
-  const result = await putObject(env, config, key, text);
+
+  // 1) 固定名「最新快照」先写：「从云端恢复 / 测试连接」读的就是它，保证这两条路永不失效
+  const result = await putObject(env, config, latestKey, text);
+  const keys = [latestKey];
+
+  // 2) 带时间戳的历史版本（可在设置里关闭）
+  let historyKey = null;
+  if (config.stamp !== false) {
+    historyKey = stampKey(latestKey, fileStamp(now, timeZone));
+    try {
+      await putObject(env, config, historyKey, text);
+      keys.push(historyKey);
+    } catch (err) {
+      throw new HttpError(
+        `历史版本写入失败（最新快照已更新）：${err?.message || err}`,
+        err instanceof HttpError ? err.status : 502,
+      );
+    }
+  }
 
   await env.DB.prepare('UPDATE settings SET last_backup = ?, updated_at = ? WHERE user_id = ?')
     .bind(nowSeconds(), nowSeconds(), user.id)
@@ -566,6 +668,11 @@ export async function runBackup(env, user, config) {
 
   return {
     ...result,
+    key: historyKey || latestKey,   // 本次实际写入的（带时间戳的）文件名
+    latestKey,                      // 固定名快照
+    historyKey,
+    keys,
+    stamped: !!historyKey,
     size: new TextEncoder().encode(text).length,
     total: payload.stats.total,
     remaining: payload.stats.remaining,
@@ -597,17 +704,119 @@ export async function restoreBackup(env, user, config, mode = 'merge') {
 }
 
 /**
- * 数据变更后的自动备份（节流：AUTO_BACKUP_THROTTLE_SECONDS 内最多一次）。
+ * 数据变更后的自动备份。节流窗口由用户在设置里自行配置（config.intervalMin 分钟，0 = 不限流）。
  * 用 ctx.waitUntil 调用，不阻塞用户请求。
  */
-export async function maybeAutoBackup(env, user) {
+export async function maybeAutoBackup(env, user, { timeZone = '' } = {}) {
   try {
     const { config, lastBackup } = await readConfig(env, user.id);
     if (!config.enabled || !config.auto || config.provider === 'none') return;
-    if (lastBackup && nowSeconds() - lastBackup < AUTO_BACKUP_THROTTLE_SECONDS) return;
-    await runBackup(env, user, config);
-    console.log(`[auto-backup] user=${user.id} provider=${config.provider} ok`);
+
+    const intervalSec = Math.max(0, config.intervalMin ?? DEFAULT_INTERVAL_MIN) * 60;
+    if (intervalSec > 0 && lastBackup && nowSeconds() - lastBackup < intervalSec) return;
+
+    const result = await runBackup(env, user, config, { timeZone: timeZone || config.tz });
+    console.log(`[auto-backup] user=${user.id} provider=${config.provider} key=${result.key} ok`);
   } catch (err) {
     console.error(`[auto-backup] 失败：${err?.message || err}`);
   }
+}
+
+/* ============================== 定时备份（Cron） ============================== */
+
+/**
+ * 记住用户的时区，供「定时备份」拼文件名用
+ * （Cron 触发时没有请求上下文，拿不到 request.cf.timezone）。
+ * 只在时区变化时写库，返回最新的 config。
+ */
+export async function rememberTimeZone(env, userId, config, timeZone) {
+  const tz = pickString(timeZone);
+  if (!tz || config.tz === tz) return config;
+  const next = { ...config, tz };
+  await writeConfig(env, userId, next);
+  return next;
+}
+
+/** 记录一次 Cron 心跳（借用 settings 表，backup_json 保持 NULL 以免被当成用户配置） */
+export async function touchCronHeartbeat(env, at = nowSeconds()) {
+  await env.DB.prepare(
+    `INSERT INTO settings (user_id, backup_json, last_backup, updated_at)
+     VALUES (?, NULL, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET last_backup = excluded.last_backup, updated_at = excluded.updated_at`,
+  )
+    .bind(CRON_HEARTBEAT_ROW, at, at)
+    .run();
+  return at;
+}
+
+/** 查询 Cron 是否真的在跑（设置页用它提示「定时任务未生效」） */
+export async function readCronStatus(env) {
+  try {
+    const row = await env.DB.prepare('SELECT last_backup FROM settings WHERE user_id = ?')
+      .bind(CRON_HEARTBEAT_ROW)
+      .first();
+    const lastRun = row?.last_backup || null;
+    return {
+      lastRun,
+      healthy: !!lastRun && nowSeconds() - lastRun < CRON_HEALTHY_SECONDS,
+      intervalSeconds: MIN_SCHEDULE_MIN * 60,
+    };
+  } catch {
+    return { lastRun: null, healthy: false, intervalSeconds: MIN_SCHEDULE_MIN * 60 };
+  }
+}
+
+/** 取当前时间戳（Cron 的 event.scheduledTime，缺省用当前时间） */
+export function cronNow(event) {
+  const ms = Number(event?.scheduledTime);
+  return Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : nowSeconds();
+}
+
+/**
+ * Cron 定时备份：每 5 分钟被唤醒一次，只给「到点」的用户做备份。
+ * 周期由用户自己配置（config.scheduleMin 分钟，最小 MIN_SCHEDULE_MIN）。
+ * @returns {Promise<{checked:number,due:number,ok:number,failed:Array}>}
+ */
+export async function runScheduledBackups(env, { now = nowSeconds() } = {}) {
+  await touchCronHeartbeat(env, now);
+
+  const { results } = await env.DB.prepare(
+    `SELECT s.user_id AS user_id, s.backup_json AS backup_json,
+            s.last_backup AS last_backup, u.username AS username
+       FROM settings s
+       JOIN users u ON u.id = s.user_id
+      WHERE s.backup_json IS NOT NULL`,
+  ).all();
+
+  const report = { checked: (results || []).length, due: 0, ok: 0, failed: [] };
+
+  for (const row of results || []) {
+    let config;
+    try {
+      config = normalizeConfig(JSON.parse(row.backup_json), {});
+    } catch {
+      continue;   // 配置坏了就跳过，别让一个用户拖垮整轮
+    }
+    if (!config.enabled || !config.scheduled || config.provider === 'none') continue;
+
+    const periodSec = Math.max(MIN_SCHEDULE_MIN, config.scheduleMin || 60) * 60;
+    if (row.last_backup && now - row.last_backup < periodSec) continue;
+
+    report.due += 1;
+    try {
+      const result = await runBackup(
+        env,
+        { id: row.user_id, username: row.username || 'user' },
+        config,
+        { timeZone: config.tz, now: new Date(now * 1000) },
+      );
+      report.ok += 1;
+      console.log(`[cron-backup] user=${row.user_id} key=${result.key} ok`);
+    } catch (err) {
+      report.failed.push({ user: row.user_id, error: err?.message || String(err) });
+      console.error(`[cron-backup] user=${row.user_id} 失败：${err?.message || err}`);
+    }
+  }
+
+  return report;
 }

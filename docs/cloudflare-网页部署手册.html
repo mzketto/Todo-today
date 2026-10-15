@@ -299,7 +299,7 @@
   </ol>
   <div class="callout warn">
     <span class="t">必须粘贴完整，一行都不能少</span>
-    文件约 <strong>3100 行 / 200 KB</strong>，其中大量长字符串是内联进去的网页文件。
+    文件约 <strong>3600 行 / 240 KB</strong>，其中大量长字符串是内联进去的网页文件。
     如果粘贴后页面显示空白或样式全丢，多半是复制不完整——重新全选复制一次即可。
     粘贴后建议在编辑器里按 <code>Ctrl+End</code> 跳到文件末尾，
     确认最后一行是 <code>};</code> 且不是半截内容。
@@ -526,6 +526,23 @@
      <code>DB</code>（大写，无空格）。</p>
   <p>注意和上一条区别开：报 <code>未绑定 D1 数据库</code> 是<strong>没连上库</strong>；
      报 <code>no such table</code> 是<strong>连上了但没建表</strong>。</p>
+</details>
+
+<details>
+  <summary>设置里开了「定时备份」，但一直提示「还没收到定时任务的心跳」</summary>
+  <p>定时备份靠 <strong>Cron Triggers（定时触发器）</strong>驱动，代码部署后还要加一条触发规则：</p>
+  <ol>
+    <li>打开 <strong>Workers &amp; Pages</strong> → 点进你的 Worker（<code>todo-today</code>）</li>
+    <li><strong>Settings › Triggers（触发事件）</strong></li>
+    <li>在 <strong>Cron Triggers</strong> 里点 <strong>Add Cron Trigger</strong></li>
+    <li>填入 <code>*/5 * * * *</code>（意思是每 5 分钟唤醒一次），保存</li>
+  </ol>
+  <p>加好之后回到应用的设置页，等最多 5 分钟，「定时任务运行正常（上次检查 x 分钟前）」就说明生效了。
+     备份周期本身（每 15 分钟 / 每小时 / 每天……）在<strong>应用内设置</strong>里选，不需要改这条 Cron。</p>
+  <div class="callout note">
+    <span class="t">只想用「变更后自动备份」的话</span>
+    不加这条 Cron 也完全没关系——那个功能由你的操作触发，不依赖定时器。
+  </div>
 </details>
 
 <details>

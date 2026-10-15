@@ -28,6 +28,25 @@ export default {
       return fail(explainError(err, status), status);
     }
   },
+
+  /**
+   * 定时备份：由 Cron Trigger 唤起（默认每 5 分钟一次），
+   * 只对「配置了定时备份且已到周期」的用户真正执行上传。
+   */
+  async scheduled(event, env, ctx) {
+    const task = (async () => {
+      try {
+        const report = await backup.runScheduledBackups(env, { now: backup.cronNow(event) });
+        console.log('[cron] 完成', JSON.stringify(report));
+        return report;
+      } catch (err) {
+        console.error('[cron] 失败', err?.stack || err);
+        return null;
+      }
+    })();
+    if (ctx?.waitUntil) ctx.waitUntil(task);
+    return task;   // 也直接返回，便于本地调用 / 测试拿到结果
+  },
 };
 
 const REQUIRED_TABLES = ['users', 'sessions', 'todos', 'settings'];
@@ -197,7 +216,7 @@ async function route(request, env, ctx, url) {
     const body = await readJson(request);
     const todo = await todos.createTodo(env, user.id, body);
     const stat = await todos.countByDate(env, user.id, todo.date);
-    scheduleAutoBackup(ctx, env, user);
+    scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
     return json({ ok: true, todo, ...stat }, { status: 201 });
   }
 
@@ -211,25 +230,25 @@ async function route(request, env, ctx, url) {
       // 支持按月清除：{ action: 'clear-completed', month: 'YYYY-MM' }
       if (body.month) {
         const res = await todos.clearCompletedMonth(env, user.id, body.month);
-        scheduleAutoBackup(ctx, env, user);
+        scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
         return ok(res);
       }
       const res = await todos.clearCompleted(env, user.id, date);
       const stat = await todos.countByDate(env, user.id, date);
-      scheduleAutoBackup(ctx, env, user);
+      scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
       return ok({ ...res, ...stat });
     }
 
     if (body.action === 'toggle-all') {
       const res = await todos.toggleAll(env, user.id, date, !!body.done);
       const stat = await todos.countByDate(env, user.id, date);
-      scheduleAutoBackup(ctx, env, user);
+      scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
       return ok({ ...res, ...stat });
     }
 
     if (body.action === 'reorder') {
       const res = await todos.reorderTodos(env, user.id, date, body.ids);
-      scheduleAutoBackup(ctx, env, user);
+      scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
       return ok(res);
     }
 
@@ -237,7 +256,7 @@ async function route(request, env, ctx, url) {
       const res = await todos.carryOver(env, user.id, { from: body.from || null, to: date });
       const list = await todos.listTodos(env, user.id, date);
       const stat = await todos.countByDate(env, user.id, date);
-      scheduleAutoBackup(ctx, env, user);
+      scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
       return ok({ ...res, todos: list, ...stat });
     }
 
@@ -273,7 +292,7 @@ async function route(request, env, ctx, url) {
       const body = await readJson(request);
       const todo = await todos.updateTodo(env, user.id, id, body);
       const stat = await todos.countByDate(env, user.id, todo.date);
-      scheduleAutoBackup(ctx, env, user);
+      scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
       return ok({ todo, ...stat });
     }
 
@@ -282,7 +301,7 @@ async function route(request, env, ctx, url) {
       const date = url.searchParams.get('date');
       let stat = { remaining: 0, total: 0 };
       if (date && todos.DATE_RE.test(date)) stat = await todos.countByDate(env, user.id, date);
-      scheduleAutoBackup(ctx, env, user);
+      scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
       return ok({ ...res, ...stat });
     }
   }
@@ -291,10 +310,12 @@ async function route(request, env, ctx, url) {
   if (path === '/api/backup/config' && method === 'GET') {
     const user = await auth.requireUser(request, env);
     const { config, lastBackup } = await backup.readConfig(env, user.id);
+    // 顺手记住用户时区：定时备份（Cron）没有请求上下文，拼文件名时要用
+    const fresh = await backup.rememberTimeZone(env, user.id, config, request.cf?.timezone);
     return ok({
-      config: backup.maskConfig(config, env),
+      config: backup.maskConfig(fresh, env),
       lastBackup,
-      throttleSeconds: backup.AUTO_BACKUP_THROTTLE_SECONDS,
+      cron: await backup.readCronStatus(env),
     });
   }
 
@@ -302,7 +323,10 @@ async function route(request, env, ctx, url) {
     const user = await auth.requireUser(request, env);
     const body = await readJson(request);
     const { config: previous } = await backup.readConfig(env, user.id);
-    const merged = backup.normalizeConfig(body, previous);
+    const merged = backup.normalizeConfig(
+      { ...body, tz: body.tz || request.cf?.timezone },
+      previous,
+    );
     await backup.writeConfig(env, user.id, merged);
     return ok({ config: backup.maskConfig(merged, env) });
   }
@@ -322,7 +346,9 @@ async function route(request, env, ctx, url) {
   if (path === '/api/backup/run' && method === 'POST') {
     const user = await auth.requireUser(request, env);
     const { config } = await backup.readConfig(env, user.id);
-    const result = await backup.runBackup(env, user, config.provider === 'none' ? { ...config, provider: 'none' } : config);
+    const result = await backup.runBackup(env, user, config, {
+      timeZone: request.cf?.timezone || config.tz,
+    });
     return ok({ message: '已备份到云端', result });
   }
 
@@ -342,7 +368,8 @@ async function route(request, env, ctx, url) {
   if (path === '/api/export' && method === 'GET') {
     const user = await auth.requireUser(request, env);
     const payload = await backup.buildPayload(env, user);
-    const filename = `todo-today-${new Date().toISOString().slice(0, 10)}.json`;
+    // 文件名带时间戳，同一天多次导出不会互相覆盖
+    const filename = `todo-today-${backup.fileStamp(new Date(), request.cf?.timezone)}.json`;
     return new Response(JSON.stringify(payload, null, 2), {
       headers: {
         'content-type': 'application/json; charset=utf-8',
@@ -358,15 +385,16 @@ async function route(request, env, ctx, url) {
     const payload = body.payload || body;
     const mode = body.mode === 'replace' ? 'replace' : 'merge';
     const result = await backup.applyPayload(env, user, payload, { mode });
-    scheduleAutoBackup(ctx, env, user);
+    scheduleAutoBackup(ctx, env, user, request.cf?.timezone);
     return ok({ message: `导入完成：新增 ${result.inserted} 条`, result });
   }
 
   return fail(`接口不存在：${method} ${path}`, 404);
 }
 
-/** 数据变更后触发自动备份（节流由 maybeAutoBackup 内部处理） */
-function scheduleAutoBackup(ctx, env, user) {
+/** 数据变更后触发自动备份（节流由 maybeAutoBackup 内部处理）
+ *  timeZone 用于备份文件名的时间戳，取用户请求里的 Cloudflare 时区信息 */
+function scheduleAutoBackup(ctx, env, user, timeZone) {
   if (!ctx?.waitUntil) return;
-  ctx.waitUntil(backup.maybeAutoBackup(env, user));
+  ctx.waitUntil(backup.maybeAutoBackup(env, user, { timeZone }));
 }

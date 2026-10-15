@@ -188,3 +188,26 @@ test('单文件版仍可通过 ASSETS 绑定让位给 wrangler 部署', async ()
   assert.equal(await res.text(), 'from-assets');
   assert.equal(forwarded, '/index.html');
 });
+
+test('单文件版也会暴露定时备份处理器，并支持自定义频率', async () => {
+  assert.equal(typeof worker.scheduled, 'function', '缺少 scheduled 处理器，Cron Triggers 会报错');
+
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: '定时用户', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '定时备份我', date: TODAY });
+
+  const saved = await json(await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, scheduled: true, intervalMin: 30, scheduleMin: 15, stamp: true,
+  }));
+  assert.equal(saved.config.intervalMin, 30);
+  assert.equal(saved.config.scheduleMin, 15);
+
+  // 网页部署没有 R2 绑定 -> 定时任务给出人话报错，且不会抛出去
+  const report = await worker.scheduled({ scheduledTime: Date.now() }, h.env, { waitUntil: (p) => p });
+  assert.equal(report.due, 1);
+  assert.equal(report.ok, 0);
+  assert.match(report.failed[0].error, /R2/);
+
+  const after = await json(await h.call('GET', '/api/backup/config'));
+  assert.equal(after.cron.healthy, true, '心跳已写入，设置页可据此判断定时任务是否生效');
+});

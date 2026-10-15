@@ -255,6 +255,52 @@
           </label>
         </div>
 
+        <label class="field hidden" id="backup-interval-field">
+          <span>最短备份间隔</span>
+          <select id="backup-interval">
+            <option value="0">每次变更都备份（不限制）</option>
+            <option value="1">1 分钟</option>
+            <option value="5">5 分钟</option>
+            <option value="15">15 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60">1 小时</option>
+            <option value="360">6 小时</option>
+            <option value="1440">24 小时</option>
+          </select>
+        </label>
+        <p class="hint" id="backup-interval-hint"></p>
+
+        <div class="switch-row">
+          <label class="switch">
+            <input type="checkbox" id="backup-scheduled" />
+            <span class="slider"></span>
+            <span class="switch-text">定时备份（不操作也会备份）</span>
+          </label>
+        </div>
+
+        <label class="field hidden" id="backup-period-field">
+          <span>定时备份周期</span>
+          <select id="backup-period">
+            <option value="5">每 5 分钟</option>
+            <option value="15">每 15 分钟</option>
+            <option value="30">每 30 分钟</option>
+            <option value="60">每小时</option>
+            <option value="360">每 6 小时</option>
+            <option value="720">每 12 小时</option>
+            <option value="1440">每天</option>
+          </select>
+        </label>
+        <p class="hint" id="backup-cron-hint"></p>
+
+        <div class="switch-row">
+          <label class="switch">
+            <input type="checkbox" id="backup-stamp" />
+            <span class="slider"></span>
+            <span class="switch-text">文件名带时间戳（保留历史版本）</span>
+          </label>
+        </div>
+        <p class="hint" id="backup-stamp-hint"></p>
+
         <!-- R2 -->
         <div class="provider-panel" data-provider="r2" hidden>
           <label class="field"><span>对象键名</span>
