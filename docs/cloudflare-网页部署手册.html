@@ -119,6 +119,7 @@
   .tw { overflow-x: auto; margin: 14px 0; }
   table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
   th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.same { color: var(--ink-3); font-style: italic; }
   th { background: var(--code-bg); font-weight: 600; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
   td code { white-space: nowrap; }
@@ -641,6 +642,45 @@
   它支持在 <code>wrangler.jsonc</code> 里声明 <code>assets</code> 静态资源目录，
   网页资源由 Cloudflare 的 CDN 直接托管，比打包进 Worker 更快。
   用这种方式时，第 ② 步的「粘贴单文件代码」可以整步跳过。
+</div>
+
+<h3>方案 A 与方案 B 的功能完全一致</h3>
+<p>两条路走的是<strong>同一份源码</strong>，只是静态资源的分发方式不同：</p>
+<table>
+  <tr><th>对比项</th><th>方案 A · 网页粘贴单文件</th><th>方案 B · Git 自动构建</th></tr>
+  <tr>
+    <td>后端代码</td>
+    <td colspan="2" class="same">同一个 <code>src/index.js</code> 入口</td>
+  </tr>
+  <tr>
+    <td>前端文件</td>
+    <td><code>public/</code> 打包成 base64 内联在单文件里</td>
+    <td><code>public/</code> 由 <code>assets</code> 绑定直接托管</td>
+  </tr>
+  <tr>
+    <td>账号与数据隔离</td>
+    <td colspan="2" class="same">完全一致</td>
+  </tr>
+  <tr>
+    <td>待办功能 / 日期选择 / 加载速度</td>
+    <td colspan="2" class="same">完全一致</td>
+  </tr>
+</table>
+<p>因为后端是同一个文件，<strong>「不同账号各自管理自己的待办」这件事在两条路径上都成立</strong>——
+它由 Worker 里的会话校验和 <code>user_id</code> 过滤保证，与前端怎么分发无关。
+前端只负责切换账号时清干净本地缓存，这部分代码两条路径也共用。</p>
+<div class="callout warn">
+  <span class="t">方案 B 唯一要额外注意的是：别漏传 public/ 目录</span>
+  <p>方案 B 不靠内联，而是<strong>直接读取仓库里 <code>public/</code> 目录下的文件</strong>。
+     如果 <code>.gitignore</code> 里误写了 <code>public/</code>，或者提交时漏掉了这几个文件，
+     部署出来的网站会是空白页或者旧版本。</p>
+  <p>确认方法：在 GitHub 仓库页面能看到 <code>public/app.js</code>、<code>public/index.html</code>、
+     <code>public/style.css</code> 这三个文件。改完前端后，记得 <code>git add public/</code> 一并提交。</p>
+</div>
+<div class="callout note">
+  <span class="t">切换方案时不用重新建库</span>
+  两个方案连的是同一个 D1 数据库，账号和待办数据都在库里。
+  无论从 A 换到 B 还是反过来，已有账号和待办都原样保留，直接登录即可。
 </div>
 
 <hr />

@@ -1,0 +1,9 @@
+# 本地开发用（`wrangler dev`）。复制成 .dev.vars 后填写真实值。
+# 线上请改用：npx wrangler secret put <名称>
+# 注意：.dev.vars 已在 .gitignore 中，切勿提交到仓库。
+
+# 备份用的 S3 / R2(S3 接口) 私钥（可留空，改用页面上填写的密钥）
+BACKUP_S3_SECRET_KEY=
+
+# 备份用的 WebDAV 密码（可留空，改用页面上填写的密码）
+BACKUP_WEBDAV_PASSWORD=

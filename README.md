@@ -278,6 +278,13 @@ npx wrangler d1 execute todo-today --remote --file=./schema.sql
 填回仓库的 `wrangler.jsonc` 并提交，Workers Builds 会自动重新部署。
 务必选线上在用的那个库——绑到新的空库会「部署成功但数据为空」，还要对新库补执行 `schema.sql`。
 
+**Q: 换成 Git 自动构建（方案 B）后，多账号数据隔离还有效吗？**
+有效，而且和网页粘贴方案完全一致。两个方案共用同一个 Worker 入口 `src/index.js`，
+账号隔离由服务端的会话校验 + 所有查询强制带 `user_id` 保证，与前端资源怎么分发无关。
+唯一区别是静态资源来源：方案 B 直接读取仓库里的 `public/` 目录，
+所以推送前务必确认 `public/app.js`、`public/index.html`、`public/style.css` 都已提交
+（`.gitignore` 里不要包含 `public/`），否则页面会空白或停留在旧版本。
+
 **Q: 怎么确认后台是否健康？**
 访问 `/api/health` 看绑定，访问 `/api/health?check=1` 会真的连一次库并列出缺失的表。
 

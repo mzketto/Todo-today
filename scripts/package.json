@@ -1,0 +1,20 @@
+{
+  "name": "todo-today",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "今日待办清单 · Cloudflare Workers + D1 + R2 无服务器应用",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute todo-today --local --file=./schema.sql",
+    "db:remote": "wrangler d1 execute todo-today --remote --file=./schema.sql",
+    "tail": "wrangler tail",
+    "build:dashboard": "node scripts/build-dashboard.mjs",
+    "test": "node test/run.mjs && node test/bundle.mjs",
+    "check": "node --check src/index.js && node --check public/app.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.20.0"
+  }
+}

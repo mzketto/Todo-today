@@ -648,6 +648,8 @@
 
     try {
       const data = await api(`/auth/${state.authMode}`, { method: 'POST', body: { username, password } });
+      // 换账号必须先清空上一个账号的一切痕迹，避免数据串到新账号
+      resetUserState();
       state.user = data.user;
       el.authPassword.value = '';
       await showMain();
@@ -659,12 +661,48 @@
     }
   });
 
+  /**
+   * 清空所有与「当前用户」绑定的前端状态：
+   * 内存缓存、列表、侧栏统计、标签、搜索态、演示数据等。
+   * 登录、退出、会话失效（401）时都必须调用，保证账号间零残留。
+   */
+  function resetUserState() {
+    cacheClearAll();          // 单日 / 整月缓存
+    state.todos = [];
+    state.monthTodos = [];
+    state.month = null;
+    state.remaining = 0;
+    state.total = 0;
+    state.stats = [];
+    state.tags = [];
+    exitSearch();             // 清掉搜索关键字与结果
+    closeDatePop();
+    closeDrawer();
+    // 清空已渲染的 DOM，避免旧账号内容一闪而过
+    el.feed.innerHTML = '';
+    el.tagsList.innerHTML = '';
+    el.timelineList.innerHTML = '';
+    el.searchInput.value = '';
+    el.searchClear?.classList.add('hidden');
+    el.statDays.textContent = '0';
+    el.statTotal.textContent = '0';
+    el.statDone.textContent = '0';
+    el.remainingCount.textContent = '0';
+    el.emptyState?.classList.add('hidden');
+  }
+
+  /** 会话失效（401）统一处理：清空当前用户的所有残留状态并回到登录页 */
+  function handleSessionLost() {
+    resetUserState();
+    state.user = null;
+    showAuth();
+    toast('登录状态已失效，请重新登录');
+  }
+
   el.logoutBtn.addEventListener('click', async () => {
     try { await api('/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+    resetUserState();
     state.user = null;
-    state.todos = [];
-    cacheClearAll();
-    closeDrawer();
     showAuth();
     toast('已退出登录');
   });
@@ -949,7 +987,7 @@
         }
       }
     } catch (err) {
-      if (err.status === 401) { state.user = null; showAuth(); return; }
+      if (err.status === 401) { handleSessionLost(); return; }
       if (!cached) toast(err.message, 'err');
     }
   }
@@ -1257,7 +1295,7 @@
       prefetchDay(shiftDate(date, -1));
       prefetchDay(shiftDate(date, 1));
     } catch (err) {
-      if (err.status === 401) { state.user = null; showAuth(); return; }
+      if (err.status === 401) { handleSessionLost(); return; }
       if (!cached) toast(err.message, 'err');   // 已有缓存内容在展示时静默
     }
   }
@@ -1453,7 +1491,7 @@
         state.search.results = data.todos || [];
       }
     } catch (err) {
-      if (err.status === 401) { state.user = null; showAuth(); return; }
+      if (err.status === 401) { handleSessionLost(); return; }
       toast(err.message, 'err');
     } finally {
       if (state.search.active && state.search.q === q) {
@@ -1512,7 +1550,7 @@
         await refreshMonth();
         scheduleSidebarRefresh();
       } catch (err) {
-        if (err.status === 401) { showAuth(); return; }
+        if (err.status === 401) { handleSessionLost(); return; }
         toast(err.message, 'err');
         el.addInput.value = title;
       } finally {
@@ -1547,7 +1585,7 @@
       state.total = Math.max(0, state.total - 1);
       state.remaining = state.todos.filter((t) => !t.done).length;
       renderList();
-      if (err.status === 401) { showAuth(); return; }
+      if (err.status === 401) { handleSessionLost(); return; }
       toast(err.message, 'err');
       el.addInput.value = title;
     } finally {
@@ -2045,6 +2083,18 @@
     }
   });
 
+  /** 探测后端是否允许注册；不允许时隐藏「注册」标签页 */
+  async function syncRegistrationTab() {
+    try {
+      const health = await api('/health');
+      if (health && health.registration === false) {
+        const regTab = el.tabs.find((t) => t.dataset.mode === 'register');
+        regTab?.classList.add('hidden');
+        if (state.authMode === 'register') setAuthMode('login');
+      }
+    } catch { /* 探测失败就按默认显示 */ }
+  }
+
   (async function boot() {
     renderDate();
 
@@ -2058,6 +2108,7 @@
       return;
     }
 
+    await syncRegistrationTab();
     try {
       const data = await api('/auth/me');
       state.user = data.user;

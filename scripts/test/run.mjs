@@ -1,0 +1,920 @@
+/**
+ * 测试入口：node --test test/    或   node test/run.mjs
+ *
+ *  1) SigV4 签名回归：跑 AWS 官方 aws-sig-v4-test-suite 的测试向量
+ *  2) API 端到端：用内存 SQLite 冒充 D1，把 Worker 的 fetch 全流程跑一遍
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+import worker from '../src/index.js';
+import { signRequest, fileStamp, stampKey } from '../src/lib/backup.js';
+import { createD1 } from './d1-shim.mjs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(__dirname, '..');
+
+/* ============================================================
+ * 1. SigV4 官方测试向量
+ * ============================================================ */
+
+const VECTORS = {
+  accessKeyId: 'AKIDEXAMPLE',
+  secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY',
+  region: 'us-east-1',
+  service: 'service',
+};
+
+/** 解析 aws-sig-v4-test-suite 的 .req 文件 */
+function parseReq(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n').filter((l) => l.length);
+  const [method, path] = lines[0].split(' ');
+  const headers = {};
+  for (const line of lines.slice(1)) {
+    const i = line.indexOf(':');
+    if (i === -1) continue;
+    headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return { method, path, headers };
+}
+
+const fixtureDir = join(__dirname, 'fixtures', 'sigv4');
+const cases = readdirSync(fixtureDir).filter((f) => f.endsWith('.authz')).map((f) => f.replace(/\.authz$/, ''));
+
+assert.ok(cases.length >= 4, '测试向量缺失');
+
+for (const name of cases) {
+  test(`SigV4 官方向量 · ${name}`, async () => {
+    const req = parseReq(readFileSync(join(fixtureDir, `${name}.req`), 'utf8'));
+    const expectedAuth = readFileSync(join(fixtureDir, `${name}.authz`), 'utf8').trim();
+    const expectedCreq = readFileSync(join(fixtureDir, `${name}.creq`), 'utf8').trim();
+    const expectedSts = readFileSync(join(fixtureDir, `${name}.sts`), 'utf8').trim();
+
+    const amzDate = req.headers['X-Amz-Date'] || req.headers['x-amz-date'];
+    const date = new Date(
+      `${amzDate.slice(0, 4)}-${amzDate.slice(4, 6)}-${amzDate.slice(6, 8)}T` +
+      `${amzDate.slice(9, 11)}:${amzDate.slice(11, 13)}:${amzDate.slice(13, 15)}.000Z`,
+    );
+
+    const { authorization, canonicalRequest, stringToSign } = await signRequest({
+      method: req.method,
+      url: `https://example.amazonaws.com${req.path}`,
+      headers: req.headers,
+      body: '',
+      date,
+      addContentSha256: false,
+      ...VECTORS,
+    });
+
+    assert.equal(canonicalRequest, expectedCreq, '规范请求不一致');
+    assert.equal(stringToSign, expectedSts, '待签字符串不一致');
+    assert.equal(authorization, expectedAuth, 'Authorization 头不一致');
+  });
+}
+
+/* ============================================================
+ * 2. API 端到端
+ * ============================================================ */
+
+function makeHarness() {
+  const db = createD1(':memory:');
+  db._raw.exec(readFileSync(join(ROOT, 'schema.sql'), 'utf8'));
+
+  const env = { DB: db, APP_NAME: '今日待办', ALLOW_REGISTRATION: 'true' };
+  const pending = [];
+  const ctx = { waitUntil: (p) => pending.push(Promise.resolve(p).catch(() => {})), passThroughOnException() {} };
+
+  let cookie = '';
+
+  async function call(method, path, body, { auth = true } = {}) {
+    const headers = {};
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    if (auth && cookie) headers.cookie = cookie;
+
+    const res = await worker.fetch(
+      new Request(`https://todo.example.com${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+      env,
+      ctx,
+    );
+
+    const setCookie = res.headers.get('set-cookie');
+    if (setCookie) cookie = setCookie.split(';')[0];
+
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
+    return { status: res.status, data, text };
+  }
+
+  return {
+    call,
+    db,
+    env,
+    flush: () => Promise.all(pending),
+    /** 读写当前会话 Cookie，便于在多用户场景间切换身份 */
+    get cookie() { return cookie; },
+    set cookie(value) { cookie = value; },
+  };
+}
+
+const TODAY = (() => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+})();
+
+test('健康检查', async () => {
+  const h = makeHarness();
+  const res = await h.call('GET', '/api/health');
+  assert.equal(res.status, 200);
+  assert.equal(res.data.db, true);
+  assert.equal(res.data.r2, false);
+});
+
+test('未登录访问待办返回 401', async () => {
+  const h = makeHarness();
+  const res = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(res.status, 401);
+  assert.equal(res.data.ok, false);
+});
+
+test('注册与登录校验', async () => {
+  const h = makeHarness();
+
+  assert.equal((await h.call('POST', '/api/auth/register', { username: 'a', password: '123456' })).status, 400, '用户名太短');
+  assert.equal((await h.call('POST', '/api/auth/register', { username: 'someone', password: '123' })).status, 400, '密码太短');
+
+  const reg = await h.call('POST', '/api/auth/register', { username: '小明', password: 'secret123' });
+  assert.equal(reg.status, 200);
+  assert.equal(reg.data.user.username, '小明');
+
+  const me = await h.call('GET', '/api/auth/me');
+  assert.equal(me.data.user.username, '小明');
+
+  const dup = await h.call('POST', '/api/auth/register', { username: '小明', password: 'secret123' });
+  assert.equal(dup.status, 409, '重复用户名应被拒绝');
+
+  const badLogin = await h.call('POST', '/api/auth/login', { username: '小明', password: 'wrong' }, { auth: false });
+  assert.equal(badLogin.status, 401);
+
+  const goodLogin = await h.call('POST', '/api/auth/login', { username: '小明', password: 'secret123' }, { auth: false });
+  assert.equal(goodLogin.status, 200);
+});
+
+test('新增待办：空白任务不添加', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user1', password: 'secret123' });
+
+  for (const blank of ['', '   ', '\t\n ', null, undefined]) {
+    const res = await h.call('POST', '/api/todos', { title: blank, date: TODAY });
+    assert.equal(res.status, 400, `空白任务 [${JSON.stringify(blank)}] 应被拒绝`);
+  }
+
+  const created = await h.call('POST', '/api/todos', { title: '  写周报  ', date: TODAY });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.todo.title, '写周报', '应自动去除首尾空白');
+  assert.equal(created.data.remaining, 1);
+});
+
+test('勾选 / 删除 / 剩余计数', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user2', password: 'secret123' });
+
+  const a = (await h.call('POST', '/api/todos', { title: '任务A', date: TODAY })).data.todo;
+  await h.call('POST', '/api/todos', { title: '任务B', date: TODAY });
+  const c = (await h.call('POST', '/api/todos', { title: '任务C', date: TODAY })).data.todo;
+
+  let list = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(list.data.todos.length, 3);
+  assert.equal(list.data.remaining, 3);
+  assert.equal(list.data.total, 3);
+
+  // 勾选 A
+  const toggled = await h.call('PATCH', `/api/todos/${a.id}`, { done: true });
+  assert.equal(toggled.status, 200);
+  assert.equal(toggled.data.remaining, 2);
+
+  // 已完成的应沉到列表底部
+  list = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(list.data.todos.at(-1).id, a.id, '已完成项应排在最后');
+  assert.equal(list.data.todos.at(-1).done, true);
+
+  // 取消勾选
+  await h.call('PATCH', `/api/todos/${a.id}`, { done: false });
+  list = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(list.data.remaining, 3);
+
+  // 删除 C
+  const del = await h.call('DELETE', `/api/todos/${c.id}?date=${TODAY}`);
+  assert.equal(del.status, 200);
+  list = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(list.data.todos.length, 2);
+
+  // 删除不存在的
+  assert.equal((await h.call('DELETE', `/api/todos/nope?date=${TODAY}`)).status, 404);
+
+  // 改标题
+  const renamed = await h.call('PATCH', `/api/todos/${a.id}`, { title: '任务A改名' });
+  assert.equal(renamed.data.todo.title, '任务A改名');
+  assert.equal((await h.call('PATCH', `/api/todos/${a.id}`, { title: '   ' })).status, 400, '改成空白应被拒绝');
+});
+
+test('日期隔离与非法日期', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user3', password: 'secret123' });
+
+  await h.call('POST', '/api/todos', { title: '今天的事', date: TODAY });
+  await h.call('POST', '/api/todos', { title: '明天的事', date: '2030-01-01' });
+
+  const today = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(today.data.todos.length, 1);
+
+  const other = await h.call('GET', '/api/todos?date=2030-01-01');
+  assert.equal(other.data.todos.length, 1);
+  assert.equal(other.data.todos[0].title, '明天的事');
+
+  assert.equal((await h.call('GET', '/api/todos?date=2024-13-01')).status, 400);
+  assert.equal((await h.call('GET', '/api/todos?date=not-a-date')).status, 400);
+});
+
+test('清除已完成 / 全选 / 顺延未完成', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user4', password: 'secret123' });
+
+  await h.call('POST', '/api/todos', { title: '旧任务1', date: '2020-01-01' });
+  await h.call('POST', '/api/todos', { title: '旧任务2', date: '2020-01-02' });
+  const t1 = (await h.call('POST', '/api/todos', { title: '今日任务', date: TODAY })).data.todo;
+
+  // 顺延：把过去所有未完成项挪到今天
+  const carry = await h.call('POST', '/api/todos/batch', { action: 'carry-over', date: TODAY });
+  assert.equal(carry.status, 200);
+  assert.equal(carry.data.moved, 2);
+  const afterCarry = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(afterCarry.data.todos.length, 3);
+  assert.equal((await h.call('GET', '/api/todos?date=2020-01-01')).data.todos.length, 0, '源日期应已清空');
+
+  // 全部完成
+  const all = await h.call('POST', '/api/todos/batch', { action: 'toggle-all', date: TODAY, done: true });
+  assert.equal(all.data.remaining, 0);
+  assert.equal(all.data.total, 3);
+
+  // 清除已完成
+  const cleared = await h.call('POST', '/api/todos/batch', { action: 'clear-completed', date: TODAY });
+  assert.equal(cleared.data.removed, 3);
+  assert.equal((await h.call('GET', `/api/todos?date=${TODAY}`)).data.todos.length, 0);
+
+  // 顺延一次没有任务的情况
+  const empty = await h.call('POST', '/api/todos/batch', { action: 'carry-over', date: TODAY });
+  assert.equal(empty.data.moved, 0);
+
+  // 修改已完成状态不影响
+  await h.call('PATCH', `/api/todos/${t1.id}`, { done: true });
+});
+
+test('多用户数据隔离', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'alice', password: 'secret123' });
+  const aliceTodo = (await h.call('POST', '/api/todos', { title: 'Alice 的秘密', date: TODAY })).data.todo;
+
+  const aliceCookie = h.cookie;
+  await h.call('POST', '/api/auth/register', { username: 'bob', password: 'secret123' }, { auth: false });
+
+  assert.equal((await h.call('GET', `/api/todos?date=${TODAY}`)).data.todos.length, 0, 'bob 不应看到 alice 的数据');
+  assert.equal((await h.call('PATCH', `/api/todos/${aliceTodo.id}`, { done: true })).status, 404, 'bob 不能改 alice 的任务');
+
+  // 换回 alice
+  h.cookie = aliceCookie;
+  assert.equal((await h.call('GET', `/api/todos?date=${TODAY}`)).data.todos.length, 1);
+  assert.equal((await h.call('GET', `/api/todos?date=${TODAY}`)).data.remaining, 1);
+});
+
+test('退出登录后会话失效', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user5', password: 'secret123' });
+  assert.equal((await h.call('GET', '/api/auth/me')).data.user.username, 'user5');
+
+  await h.call('POST', '/api/auth/logout');
+  assert.equal((await h.call('GET', '/api/auth/me')).data.user, null);
+  assert.equal((await h.call('GET', `/api/todos?date=${TODAY}`)).status, 401);
+});
+
+test('修改密码后其它会话被注销', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user6', password: 'secret123' });
+
+  assert.equal((await h.call('POST', '/api/auth/password', { currentPassword: 'nope', newPassword: 'newsecret' })).status, 401);
+  assert.equal((await h.call('POST', '/api/auth/password', { currentPassword: 'secret123', newPassword: '123' })).status, 400);
+
+  const ok = await h.call('POST', '/api/auth/password', { currentPassword: 'secret123', newPassword: 'newsecret' });
+  assert.equal(ok.status, 200);
+
+  // 旧密码失效
+  assert.equal((await h.call('POST', '/api/auth/login', { username: 'user6', password: 'secret123' }, { auth: false })).status, 401);
+  assert.equal((await h.call('POST', '/api/auth/login', { username: 'user6', password: 'newsecret' }, { auth: false })).status, 200);
+});
+
+test('导出 JSON', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user7', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '导出测试', date: TODAY });
+
+  const res = await h.call('GET', '/api/export');
+  assert.equal(res.status, 200);
+  const payload = JSON.parse(res.text);
+  assert.equal(payload.app, 'todo-today');
+  assert.equal(payload.todos.length, 1);
+  assert.equal(payload.todos[0].title, '导出测试');
+  assert.equal(payload.stats.remaining, 1);
+});
+
+test('导入 JSON（覆盖模式）', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user8', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '会被覆盖', date: TODAY });
+
+  const payload = {
+    app: 'todo-today',
+    version: 1,
+    todos: [
+      { title: '导入A', done: false, date: TODAY, order: 0 },
+      { title: '导入B', done: true, date: TODAY, order: 1 },
+      { title: '   ', done: false, date: TODAY, order: 2 },
+      { title: '坏日期', done: false, date: 'xx', order: 3 },
+    ],
+  };
+
+  const res = await h.call('POST', '/api/import', { payload, mode: 'replace' });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.result.inserted, 2, '空白标题与非法日期应被过滤');
+
+  const list = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(list.data.todos.length, 2);
+  assert.equal(list.data.remaining, 1);
+
+  // 格式错误
+  assert.equal((await h.call('POST', '/api/import', { payload: { nope: 1 } })).status, 400);
+});
+
+test('合并导入时去重', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user9', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '重复项', date: TODAY });
+
+  const payload = {
+    todos: [
+      { title: '重复项', done: false, date: TODAY, order: 0 },
+      { title: '新项', done: false, date: TODAY, order: 1 },
+    ],
+  };
+  const res = await h.call('POST', '/api/import', { payload, mode: 'merge' });
+  assert.equal(res.data.result.inserted, 1);
+  assert.equal(res.data.result.skipped, 1);
+  assert.equal((await h.call('GET', `/api/todos?date=${TODAY}`)).data.todos.length, 2);
+});
+
+test('备份配置读写与脱敏', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user10', password: 'secret123' });
+
+  const initial = await h.call('GET', '/api/backup/config');
+  assert.equal(initial.status, 200);
+  assert.equal(initial.data.config.provider, 'none');
+  assert.equal(initial.data.config.s3.secretAccessKey, '');
+  assert.equal(initial.data.config.stamp, true, '文件名时间戳默认开启');
+
+  const saved = await h.call('PUT', '/api/backup/config', {
+    provider: 's3',
+    enabled: true,
+    auto: true,
+    file: 'my.json',
+    s3: {
+      endpoint: 'https://acc.r2.cloudflarestorage.com/',
+      region: 'auto',
+      bucket: 'bkt',
+      accessKeyId: 'AKID',
+      secretAccessKey: 'SUPERSECRET',
+      prefix: '/todo/',
+      pathStyle: false,
+    },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.config.enabled, true);
+  assert.equal(saved.data.config.s3.endpoint, 'https://acc.r2.cloudflarestorage.com', '应去掉末尾斜杠');
+  assert.equal(saved.data.config.s3.prefix, 'todo/', '应去掉开头斜杠');
+  assert.equal(saved.data.config.s3.secretAccessKey, '', '密钥绝不能回显');
+  assert.equal(saved.data.config.s3.hasSecretKey, true);
+
+  // 再次保存但密钥留空 -> 应保留原值
+  const again = await h.call('PUT', '/api/backup/config', {
+    provider: 's3', enabled: true, auto: true, file: 'my.json',
+    s3: { endpoint: 'https://acc.r2.cloudflarestorage.com', region: 'auto', bucket: 'bkt', accessKeyId: 'AKID', secretAccessKey: '' },
+  });
+  assert.equal(again.data.config.s3.hasSecretKey, true, '留空应沿用旧密钥');
+
+  const row = h.db._raw.prepare('SELECT backup_json FROM settings WHERE user_id = (SELECT id FROM users WHERE username = ?)').get('user10');
+  assert.ok(JSON.parse(row.backup_json).s3.secretAccessKey === 'SUPERSECRET', '密钥应真实落库');
+});
+
+test('未配置备份时执行备份应报错', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user11', password: 'secret123' });
+
+  assert.equal((await h.call('POST', '/api/backup/run')).status, 400);
+  assert.equal((await h.call('POST', '/api/backup/test', { provider: 's3' })).status, 400);
+  assert.equal((await h.call('POST', '/api/backup/restore', { mode: 'merge' })).status, 400);
+});
+
+test('S3 配置不完整时给出明确错误', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user12', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', { provider: 's3', enabled: true, s3: { bucket: 'bkt' } });
+
+  const res = await h.call('POST', '/api/backup/test', { provider: 's3', enabled: true, s3: { bucket: 'bkt' } });
+  assert.equal(res.status, 400);
+  assert.match(res.data.error, /endpoint/);
+});
+
+test('R2 模式下未绑定存储桶时提示清晰', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user13', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true });
+
+  const res = await h.call('POST', '/api/backup/run');
+  assert.equal(res.status, 400);
+  assert.match(res.data.error, /R2/);
+});
+
+test('R2 绑定可用时能完成备份与恢复', async () => {
+  const h = makeHarness();
+
+  // 假的内存 R2
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) { store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  await h.call('POST', '/api/auth/register', { username: 'user14', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '备份前', date: TODAY });
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, auto: false });
+
+  const run = await h.call('POST', '/api/backup/run');
+  assert.equal(run.status, 200);
+  assert.equal(run.data.result.total, 1);
+  assert.ok(store.has('todo-today.backup.json'));
+
+  // 清空后从云端恢复
+  await h.call('POST', '/api/todos/batch', { action: 'clear-completed', date: TODAY });
+  h.db._raw.exec('DELETE FROM todos');
+  assert.equal((await h.call('GET', `/api/todos?date=${TODAY}`)).data.todos.length, 0);
+
+  const restore = await h.call('POST', '/api/backup/restore', { mode: 'replace' });
+  assert.equal(restore.status, 200);
+  assert.equal(restore.data.result.inserted, 1);
+
+  const list = await h.call('GET', `/api/todos?date=${TODAY}`);
+  assert.equal(list.data.todos.length, 1);
+  assert.equal(list.data.todos[0].title, '备份前');
+
+  const test2 = await h.call('POST', '/api/backup/test', { provider: 'r2', enabled: true });
+  assert.equal(test2.status, 200);
+  assert.equal(test2.data.info.exists, true);
+});
+
+test('备份文件名时间戳：按指定时区生成，非法时区退回 UTC', () => {
+  const at = new Date('2026-10-15T13:57:30Z');
+  assert.equal(fileStamp(at, 'UTC'), '20261015-135730');
+  assert.equal(fileStamp(at, 'Asia/Shanghai'), '20261015-215730', '北京时间应为 21:57:30');
+  assert.equal(fileStamp(at, 'Not/AZone'), '20261015-135730', '非法时区不能导致备份失败');
+  assert.equal(fileStamp(at, undefined), '20261015-135730');
+  assert.match(fileStamp(new Date(), 'UTC'), /^\d{8}-\d{6}$/);
+});
+
+test('时间戳插在扩展名之前，目录与前缀保持不变', () => {
+  assert.equal(stampKey('todo-today.backup.json', 'X'), 'todo-today.backup.X.json');
+  assert.equal(stampKey('todo/todo-today.backup.json', 'X'), 'todo/todo-today.backup.X.json');
+  assert.equal(stampKey('dump', 'X'), 'dump.X');
+  assert.equal(stampKey('', 'X'), 'todo-today.backup.X.json');
+});
+
+test('开启时间戳后：写入带时间戳的文件，同时刷新固定名快照', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) { store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  await h.call('POST', '/api/auth/register', { username: 'user15', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '带时间戳', date: TODAY });
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, auto: false, stamp: true });
+
+  const run = await h.call('POST', '/api/backup/run');
+  assert.equal(run.status, 200);
+  assert.equal(run.data.result.stamped, true);
+  assert.match(run.data.result.key, /^todo-today\.backup\.\d{8}-\d{6}\.json$/, '返回的文件名应带时间戳');
+  assert.equal(run.data.result.latestKey, 'todo-today.backup.json');
+  assert.ok(store.has('todo-today.backup.json'), '固定名快照必须存在');
+  assert.ok(store.has(run.data.result.key), '时间戳文件必须存在');
+  assert.equal(store.size, 2, '一次备份写两份：历史版本 + 最新快照');
+  assert.equal(store.get(run.data.result.key), store.get('todo-today.backup.json'), '两份内容一致');
+
+  // 换了时间戳文件名，恢复依旧读固定名快照
+  h.db._raw.exec('DELETE FROM todos');
+  const restore = await h.call('POST', '/api/backup/restore', { mode: 'replace' });
+  assert.equal(restore.status, 200);
+  assert.equal(restore.data.result.key, 'todo-today.backup.json');
+  assert.equal(restore.data.result.inserted, 1);
+});
+
+test('关闭时间戳后：只写固定名，不产生历史文件', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) { store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  await h.call('POST', '/api/auth/register', { username: 'user16', password: 'secret123' });
+  const cfg = await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: false, stamp: false,
+  });
+  assert.equal(cfg.data.config.stamp, false);
+
+  const run = await h.call('POST', '/api/backup/run');
+  assert.equal(run.status, 200);
+  assert.equal(run.data.result.stamped, false);
+  assert.equal(run.data.result.key, 'todo-today.backup.json');
+  assert.equal(store.size, 1);
+  assert.ok(store.has('todo-today.backup.json'));
+});
+
+test('未提交 stamp 字段时沿用旧配置（留空不意外关闭）', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user17', password: 'secret123' });
+
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, stamp: false });
+  const again = await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true });
+  assert.equal(again.data.config.stamp, false, '未提交 stamp 时应保留 false');
+
+  const back = await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, stamp: true });
+  assert.equal(back.data.config.stamp, true);
+});
+
+test('备份频率可自行设置：间隔与定时周期都会落库并回显', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user18', password: 'secret123' });
+
+  const initial = await h.call('GET', '/api/backup/config');
+  assert.equal(initial.data.config.intervalMin, 1, '默认最短间隔 1 分钟');
+  assert.equal(initial.data.config.scheduled, false, '默认不开定时备份');
+  assert.equal(initial.data.config.scheduleMin, 60);
+  assert.equal(initial.data.cron.healthy, false, '没跑过 Cron 时 healthy 应为 false');
+
+  const saved = await h.call('PUT', '/api/backup/config', {
+    provider: 's3', enabled: true, auto: true, scheduled: true,
+    intervalMin: 30, scheduleMin: 360,
+    s3: { endpoint: 'https://e.x', bucket: 'b', accessKeyId: 'A', secretAccessKey: 'S' },
+  });
+  assert.equal(saved.data.config.intervalMin, 30);
+  assert.equal(saved.data.config.scheduled, true);
+  assert.equal(saved.data.config.scheduleMin, 360);
+
+  // 越界/非法值会被夹紧或回退，不能写出一个荒谬的频率
+  const wild = await h.call('PUT', '/api/backup/config', {
+    provider: 's3', enabled: true, auto: true, scheduled: true,
+    intervalMin: -5, scheduleMin: 'abc',
+    s3: { endpoint: 'https://e.x', bucket: 'b', accessKeyId: 'A', secretAccessKey: 'S' },
+  });
+  assert.equal(wild.data.config.intervalMin, 0, '负数夹到 0（不限流）');
+  assert.equal(wild.data.config.scheduleMin, 360, '非数字回退到上一次的值');
+
+  const tiny = await h.call('PUT', '/api/backup/config', {
+    provider: 's3', enabled: true, scheduled: true, scheduleMin: 1,
+    s3: { endpoint: 'https://e.x', bucket: 'b', accessKeyId: 'A', secretAccessKey: 'S' },
+  });
+  assert.equal(tiny.data.config.scheduleMin, 5, '定时周期不得小于 Cron 的 5 分钟');
+});
+
+test('变更触发的自动备份按自定义间隔节流', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  let puts = 0;
+  h.env.BACKUPS = {
+    async put(key, value) { puts += 1; store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  await h.call('POST', '/api/auth/register', { username: 'user19', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: true, stamp: false, intervalMin: 60,
+  });
+
+  await h.call('POST', '/api/todos', { title: '第一次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 1, '首次变更应触发备份');
+
+  await h.call('POST', '/api/todos', { title: '第二次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 1, '60 分钟间隔内不应重复备份');
+
+  // 把「上次备份」拨回 1 小时前 -> 间隔已过，下一次变更应再备份
+  h.db._raw.prepare("UPDATE settings SET last_backup = ? WHERE user_id = (SELECT id FROM users WHERE username = 'user19')")
+    .run(Math.floor(Date.now() / 1000) - 3600);
+  await h.call('POST', '/api/todos', { title: '第三次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 2, '间隔已过应再次备份');
+
+  // 改成「不限流」-> 紧接着的变更立刻再备份一次
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: true, stamp: false, intervalMin: 0,
+  });
+  h.db._raw.prepare("UPDATE settings SET last_backup = ? WHERE user_id = (SELECT id FROM users WHERE username = 'user19')")
+    .run(Math.floor(Date.now() / 1000) - 3600);
+  await h.call('POST', '/api/todos', { title: '第四次', date: TODAY });
+  await h.flush();
+  assert.equal(puts, 3);
+});
+
+test('定时备份：Cron 只给到点的用户备份，并写心跳', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) { store.set(key, value); },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  // A：开了定时备份；B：只开了变更触发
+  await h.call('POST', '/api/auth/register', { username: 'cronA', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: 'A 的任务', date: TODAY });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, auto: false, scheduled: true, scheduleMin: 60, stamp: false,
+  });
+  await h.call('POST', '/api/auth/logout');
+  await h.call('POST', '/api/auth/register', { username: 'cronB', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', { provider: 'r2', enabled: true, auto: true, stamp: false });
+
+  store.clear();
+  const now = Math.floor(Date.now() / 1000);
+  const report = await worker.scheduled({ scheduledTime: now * 1000 }, h.env, { waitUntil: (p) => p });
+  assert.equal(report.due, 1, '只有到点的用户会被备份');
+  assert.equal(report.ok, 1);
+  assert.equal(store.size, 1);
+
+  // 心跳应落在 __cron__ 这一行，且不影响用户配置
+  const beat = h.db._raw.prepare('SELECT backup_json, last_backup FROM settings WHERE user_id = ?').get('__cron__');
+  assert.equal(beat.backup_json, null);
+  assert.ok(beat.last_backup >= now, '心跳时间应被记录');
+
+  const status = await h.call('GET', '/api/backup/config');
+  assert.equal(status.data.cron.healthy, true, '刚跑过 Cron，应判定为正常');
+
+  // 同一个周期内再跑一次：不该重复备份
+  const again = await worker.scheduled({ scheduledTime: (now + 60) * 1000 }, h.env, { waitUntil: (p) => p });
+  assert.equal(again.due, 0, '未到周期不应重复备份');
+  assert.equal(store.size, 1);
+
+  // 周期到了（60 分钟）应再备份一次
+  const later = await worker.scheduled({ scheduledTime: (now + 3600) * 1000 }, h.env, { waitUntil: (p) => p });
+  assert.equal(later.due, 1);
+  assert.equal(later.ok, 1);
+});
+
+test('定时备份：某用户上传失败或配置损坏都不影响其它用户', async () => {
+  const h = makeHarness();
+  const store = new Map();
+  h.env.BACKUPS = {
+    async put(key, value) {
+      if (key.includes('bad')) throw new Error('模拟上传失败');
+      store.set(key, value);
+    },
+    async get(key) { return store.has(key) ? { text: async () => store.get(key) } : null; },
+    async head(key) { return store.has(key) ? { size: String(store.get(key)).length, uploaded: new Date() } : null; },
+  };
+
+  // C：上传会失败；D：正常；E：配置 JSON 损坏
+  await h.call('POST', '/api/auth/register', { username: 'cronC', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, scheduled: true, scheduleMin: 60, stamp: false,
+    r2: { key: 'bad.json' },
+  });
+  await h.call('POST', '/api/auth/register', { username: 'cronD', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, scheduled: true, scheduleMin: 60, stamp: false,
+    r2: { key: 'good.json' },
+  });
+  await h.call('POST', '/api/auth/register', { username: 'cronE', password: 'secret123' });
+  await h.call('PUT', '/api/backup/config', {
+    provider: 'r2', enabled: true, scheduled: true, scheduleMin: 60, stamp: false,
+  });
+  h.db._raw.prepare('UPDATE settings SET backup_json = ? WHERE user_id = (SELECT id FROM users WHERE username = ?)')
+    .run('{坏掉的JSON', 'cronE');
+
+  const report = await worker.scheduled({ scheduledTime: Date.now() }, h.env, { waitUntil: (p) => p });
+  assert.equal(report.checked, 3);
+  assert.equal(report.due, 2, '配置损坏的用户被跳过，不算入待备份');
+  assert.equal(report.ok, 1, '好的那个用户照样备份成功');
+  assert.equal(report.failed.length, 1);
+  assert.match(report.failed[0].error, /模拟上传失败/);
+  assert.equal(store.size, 1);
+  assert.ok(store.has('good.json'));
+});
+
+test('未知接口返回 404', async () => {
+  const h = makeHarness();
+  const res = await h.call('GET', '/api/nope');
+  assert.equal(res.status, 404);
+});
+
+test('无 D1 绑定时给出可操作的错误', async () => {
+  const res = await worker.fetch(new Request('https://x.com/api/todos?date=2024-01-01'), {}, { waitUntil() {} });
+  assert.equal(res.status, 503);
+  const body = await res.json();
+  assert.match(body.error, /D1/);
+});
+
+/* ============================================================
+ * 3. 搜索与 #标签
+ * ============================================================ */
+
+test('全文搜索按日期倒序返回，并支持 #标签 过滤', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'searcher', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '买牛奶 #购物', date: TODAY });
+  await h.call('POST', '/api/todos', { title: '取快递 #购物', date: '2026-01-05' });
+  await h.call('POST', '/api/todos', { title: '无标签任务', date: TODAY });
+
+  // 关键词命中
+  const byWord = await h.call('GET', `/api/search?q=${encodeURIComponent('快递')}`);
+  assert.equal(byWord.status, 200);
+  assert.equal(byWord.data.todos.length, 1);
+  assert.equal(byWord.data.todos[0].title, '取快递 #购物');
+
+  // #标签命中两条，日期倒序
+  const byTag = await h.call('GET', `/api/search?q=${encodeURIComponent('#购物')}`);
+  assert.deepEqual(byTag.data.todos.map((t) => t.date), [TODAY, '2026-01-05']);
+
+  // LIKE 特殊字符不注入
+  const byPct = await h.call('GET', `/api/search?q=${encodeURIComponent('%')}`);
+  assert.deepEqual(byPct.data.todos, []);
+
+  // 标签统计
+  const tags = await h.call('GET', '/api/tags');
+  assert.deepEqual(tags.data.tags, [{ name: '购物', count: 2 }]);
+
+  // 空查询返回空数组
+  const empty = await h.call('GET', '/api/search?q=');
+  assert.deepEqual(empty.data.todos, []);
+
+  // 多用户隔离：搜索不到别人的数据
+  h.cookie = '';
+  await h.call('POST', '/api/auth/register', { username: 'another', password: 'secret123' });
+  const other = await h.call('GET', `/api/search?q=${encodeURIComponent('牛奶')}`);
+  assert.deepEqual(other.data.todos, []);
+});
+
+/* ============================================================
+ * 4. 整月视图
+ * ============================================================ */
+
+test('整月视图：返回该月所有日期的任务并正确计数', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'u1', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: '月初', date: '2025-10-01' });
+  await h.call('POST', '/api/todos', { title: '月中', date: '2025-10-15' });
+  await h.call('POST', '/api/todos', { title: '月末', date: '2025-10-31' });
+  await h.call('POST', '/api/todos', { title: '隔壁月', date: '2025-11-02' });
+
+  const res = await h.call('GET', '/api/todos?month=2025-10');
+  assert.equal(res.status, 200);
+  assert.equal(res.data.month, '2025-10');
+  assert.equal(res.data.total, 3);
+  assert.equal(res.data.remaining, 3);
+  // 日期倒序、组内完整
+  const dates = [...new Set(res.data.todos.map((t) => t.date))];
+  assert.deepEqual(dates, ['2025-10-31', '2025-10-15', '2025-10-01']);
+});
+
+test('整月视图：非法月份返回 400', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'u1', password: 'secret123' });
+  const res = await h.call('GET', '/api/todos?month=2025-13');
+  assert.equal(res.status, 400);
+  assert.match(res.data.error, /YYYY-MM/);
+});
+
+test('按月清除已完成只影响该月', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'u1', password: 'secret123' });
+  const doneOct = (await h.call('POST', '/api/todos', { title: '十月完成', date: '2025-10-05' })).data.todo;
+  await h.call('POST', '/api/todos', { title: '十月未完成', date: '2025-10-06' });
+  const doneNov = (await h.call('POST', '/api/todos', { title: '十一月完成', date: '2025-11-01' })).data.todo;
+  await h.call('PATCH', `/api/todos/${doneOct.id}`, { done: true });
+  await h.call('PATCH', `/api/todos/${doneNov.id}`, { done: true });
+
+  const res = await h.call('POST', '/api/todos/batch', { action: 'clear-completed', month: '2025-10' });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.removed, 1);
+
+  const oct = await h.call('GET', '/api/todos?month=2025-10');
+  assert.equal(oct.data.total, 1);
+  assert.equal(oct.data.todos[0].title, '十月未完成');
+  const nov = await h.call('GET', '/api/todos?month=2025-11');
+  assert.equal(nov.data.total, 1);
+});
+
+test('整月视图遵循多用户数据隔离', async () => {
+  const h = makeHarness();
+  await h.call('POST', '/api/auth/register', { username: 'user-a', password: 'secret123' });
+  await h.call('POST', '/api/todos', { title: 'A 的任务', date: '2025-10-10' });
+  await h.call('POST', '/api/auth/logout', {});
+  await h.call('POST', '/api/auth/register', { username: 'user-b', password: 'secret123' });
+
+  const res = await h.call('GET', '/api/todos?month=2025-10');
+  assert.equal(res.status, 200);
+  assert.equal(res.data.total, 0);
+});
+
+/* ============================================================
+ * 4. 数据库未初始化时的诊断
+ * ============================================================ */
+
+/** 造一个「连上了库、但一张表都没有」的环境，复现 D1_ERROR: no such table */
+function makeEmptyDbHarness() {
+  const env = { DB: createD1(':memory:'), APP_NAME: '今日待办', ALLOW_REGISTRATION: 'true' };
+  const ctx = { waitUntil() {}, passThroughOnException() {} };
+  return {
+    env,
+    ctx,
+    init: () => env.DB._raw.exec(readFileSync(join(ROOT, 'schema.sql'), 'utf8')),
+    call: (method, path, body) => worker.fetch(
+      new Request(`https://todo.example.com${path}`, {
+        method,
+        headers: body === undefined ? {} : { 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+      env,
+      ctx,
+    ),
+  };
+}
+
+test('未建表时注册：底层 SQLITE_ERROR 被翻译成可照做的提示', async () => {
+  const h = makeEmptyDbHarness();
+  const res = await h.call('POST', '/api/auth/register', { username: 'alice', password: 'secret123' });
+  assert.equal(res.status, 500);
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.match(body.error, /schema\.sql/, '应直接告诉用户去执行 schema.sql');
+  assert.doesNotMatch(body.error, /D1_ERROR|SQLITE_ERROR/, '不应把底层报文原样抛给用户');
+});
+
+test('/api/health?check=1 能报出缺失的数据表', async () => {
+  const h = makeEmptyDbHarness();
+  const body = await (await h.call('GET', '/api/health?check=1')).json();
+  assert.equal(body.schema.ok, false);
+  assert.deepEqual(body.schema.missing, ['users', 'sessions', 'todos', 'settings']);
+  assert.match(body.schema.hint, /schema\.sql/);
+});
+
+test('/api/health?check=1 在建表后报告一切正常', async () => {
+  const h = makeEmptyDbHarness();
+  h.init();
+  const body = await (await h.call('GET', '/api/health?check=1')).json();
+  assert.equal(body.schema.ok, true);
+  assert.deepEqual(body.schema.missing, []);
+  assert.deepEqual(body.schema.tables, ['users', 'sessions', 'todos', 'settings']);
+});
+
+test('/api/health 默认不查库，避免健康检查产生额外开销', async () => {
+  const h = makeEmptyDbHarness();
+  const body = await (await h.call('GET', '/api/health')).json();
+  assert.equal(body.schema, undefined);
+});
+
+/* ============================================================
+ * 5. 静态资源路由
+ * ============================================================ */
+
+test('非 /api 请求交给静态资源绑定', async () => {
+  let forwarded = null;
+  const env = {
+    ASSETS: { fetch: (req) => { forwarded = new URL(req.url).pathname; return new Response('html', { status: 200 }); } },
+  };
+  const res = await worker.fetch(new Request('https://x.com/index.html'), env, { waitUntil() {} });
+  assert.equal(res.status, 200);
+  assert.equal(forwarded, '/index.html');
+});

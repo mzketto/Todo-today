@@ -1,0 +1,20 @@
+{
+  "name": "今日待办",
+  "short_name": "待办",
+  "description": "极简的每日待办清单，云端同步，支持 R2 / S3 / WebDAV 云备份。",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f5f6fb",
+  "theme_color": "#5b5bd6",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
