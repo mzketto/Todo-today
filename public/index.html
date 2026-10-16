@@ -386,7 +386,10 @@
   <div class="date-pop-head">
     <button type="button" class="mini-btn" id="pop-prev-year" aria-label="上一年" title="上一年">«</button>
     <button type="button" class="mini-btn" id="pop-prev-month" aria-label="上个月" title="上个月">‹</button>
-    <span id="pop-title" class="date-pop-title">—</span>
+    <span class="date-pop-title">
+      <input id="pop-year" class="date-pop-input" type="text" inputmode="numeric" maxlength="4" aria-label="年份" /> 年
+      <input id="pop-month" class="date-pop-input date-pop-input-month" type="text" inputmode="numeric" maxlength="2" aria-label="月份" /> 月
+    </span>
     <button type="button" class="mini-btn" id="pop-next-month" aria-label="下个月" title="下个月">›</button>
     <button type="button" class="mini-btn" id="pop-next-year" aria-label="下一年" title="下一年">»</button>
   </div>

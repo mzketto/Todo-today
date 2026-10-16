@@ -829,11 +829,32 @@ body.side-open .sidebar {
 }
 .date-pop-title {
   flex: 1;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
   font-weight: 700;
   font-size: 14.5px;
   letter-spacing: 0.02em;
 }
+.date-pop-input {
+  width: 52px;
+  border: none;
+  border-bottom: 1.5px solid transparent;
+  background: transparent;
+  text-align: center;
+  font-weight: 700;
+  font-size: 14.5px;
+  color: var(--text);
+  padding: 1px 2px;
+  border-radius: 6px 6px 0 0;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.date-pop-input-month { width: 34px; }
+.date-pop-input:hover { background: var(--surface-2); }
+.date-pop-input:focus { border-bottom-color: var(--brand); background: var(--surface-2); }
 .date-pop .mini-btn { width: 30px; height: 30px; font-size: 14px; }
 .pop-grid { gap: 1px; }
 .pop-grid .cal-day { height: 36px; }

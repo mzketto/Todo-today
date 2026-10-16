@@ -54,7 +54,8 @@
 
     // 日期选择弹层
     datePop: $('date-pop'),
-    popTitle: $('pop-title'),
+    popYear: $('pop-year'),
+    popMonth: $('pop-month'),
     popGrid: $('pop-grid'),
 
     // 侧栏
@@ -748,7 +749,9 @@
   }
 
   function renderDatePop() {
-    el.popTitle.textContent = `${pop.viewY} 年 ${pop.viewM + 1} 月`;
+    // 标题的两个输入框可手动填写年/月；正在输入时不回写，避免打断
+    if (document.activeElement !== el.popYear) el.popYear.value = String(pop.viewY);
+    if (document.activeElement !== el.popMonth) el.popMonth.value = String(pop.viewM + 1);
     el.popGrid.innerHTML = '';
     const today = todayStr();
     for (const name of ['日', '一', '二', '三', '四', '五', '六']) {
@@ -800,6 +803,23 @@
     document.addEventListener('keydown', pop.onKeydown, true);
     window.addEventListener('scroll', closeDatePop, true);
     window.addEventListener('resize', closeDatePop);
+  }
+
+  // 标题年/月可手动填写：回车或失焦后跳转，非法输入自动还原
+  function applyPopInput(input, toView) {
+    const raw = input.value.trim();
+    const n = Number(raw);
+    if (/^\d+$/.test(raw) && n >= (input === el.popYear ? 1 : 1) && n <= (input === el.popYear ? 9999 : 12)) {
+      toView(n);
+    }
+    renderDatePop();   // 非法输入时仅还原显示
+  }
+  el.popYear.addEventListener('focus', () => el.popYear.select());
+  el.popMonth.addEventListener('focus', () => el.popMonth.select());
+  el.popYear.addEventListener('change', () => applyPopInput(el.popYear, (n) => { pop.viewY = n; }));
+  el.popMonth.addEventListener('change', () => applyPopInput(el.popMonth, (n) => { pop.viewM = n - 1; }));
+  for (const inp of [el.popYear, el.popMonth]) {
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
   }
 
   $('pop-prev-year').addEventListener('click', () => { pop.viewY -= 1; renderDatePop(); });

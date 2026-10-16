@@ -159,19 +159,54 @@ const navTitle = await evalJs(`document.getElementById('page-title').textContent
 check(`左右切换日期：${navTitle}`, navTitle === '今天');
 
 // 10) 自定义日期选择弹层：打开 → 翻月 → 选日 → 确定
+const popTitleText = () => `(() => {
+  const y = document.getElementById('pop-year').value;
+  const m = document.getElementById('pop-month').value;
+  return y + ' 年 ' + m + ' 月';
+})()`;
 await evalJs(`document.getElementById('date-pill').click()`);
 await sleep(300);
 const popOpen = await evalJs(`(() => {
   const pop = document.getElementById('date-pop');
-  return { visible: !pop.classList.contains('hidden'), title: document.getElementById('pop-title').textContent };
+  return { visible: !pop.classList.contains('hidden'), title: ${popTitleText()} };
 })()`);
 check(`弹层打开：${popOpen.title}`, popOpen.visible && /年.*月/.test(popOpen.title));
 
 await evalJs(`document.getElementById('pop-prev-month').click()`);
 await evalJs(`document.getElementById('pop-prev-month').click()`);
 await sleep(200);
-const popTitle2 = await evalJs(`document.getElementById('pop-title').textContent`);
+const popTitle2 = await evalJs(popTitleText());
 check(`翻月：${popTitle2}`, popTitle2.includes('8 月') || popTitle2.includes('09') || /\d+ 年 \d+ 月/.test(popTitle2));
+
+// 10.5) 手动填写年月：改成 2025 年 3 月
+await evalJs(`(() => {
+  const y = document.getElementById('pop-year');
+  y.value = '2025';
+  y.dispatchEvent(new Event('change'));
+  const m = document.getElementById('pop-month');
+  m.value = '3';
+  m.dispatchEvent(new Event('change'));
+})()`);
+await sleep(200);
+const manualTitle = await evalJs(popTitleText());
+check(`手动填写年月：${manualTitle}`, manualTitle === '2025 年 3 月');
+await evalJs(`(() => {
+  const day = [...document.querySelectorAll('#pop-grid .cal-day')].find((b) => b.textContent.trim() === '15' && !b.className.includes('is-outside'));
+  day.click();
+})()`);
+await sleep(300);
+const manualPicked = await evalJs(`document.getElementById('page-title').textContent`);
+check(`手动填月后选日：标题=${manualPicked}`, manualPicked === '2025-03-15' || manualPicked.includes('3 月 15 日') || /15/.test(manualPicked));
+
+// 10.6) 非法月份自动还原
+await evalJs(`(() => {
+  const m = document.getElementById('pop-month');
+  m.value = '13';
+  m.dispatchEvent(new Event('change'));
+})()`);
+await sleep(150);
+const reverted = await evalJs(popTitleText());
+check(`非法月份还原：${reverted}`, reverted === '2025 年 3 月');
 
 await evalJs(`(() => {
   const day = [...document.querySelectorAll('#pop-grid .cal-day')].find((b) => b.textContent.trim() === '15' && !b.className.includes('is-outside'));
